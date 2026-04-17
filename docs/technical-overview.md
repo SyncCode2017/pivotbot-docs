@@ -33,7 +33,7 @@ All contracts are live on Base mainnet and have been operational since Q1 2026. 
 
 ## Architecture: Four-Contract System
 
-PivotBot v2.1 uses four contracts working in concert. Factory deploys a PivotBot instance per user. Manager holds protocol-wide configuration and fee routing. AgentVault sits between the CDP agent hot wallet and the user's PivotBot, enforcing hard constraints on what the agent can do and how much capital it can touch. PivotBot is the core execution engine that interacts with Moonwell, Aerodrome, and Balancer.
+PivotBot v2.0 uses four contracts working in concert. Factory deploys a PivotBot instance per user. Manager holds protocol-wide configuration and fee routing. AgentVault sits between the CDP agent hot wallet and the user's PivotBot, enforcing hard constraints on what the agent can do and how much capital it can touch. PivotBot is the core execution engine that interacts with Moonwell, Aerodrome, and Balancer.
 
 ```
 User Wallet
@@ -103,7 +103,7 @@ User → PivotBot.closePosition(borrowAsset, collateralAsset)
 
 **Access Control:**
 - **Role-based access:** `DEFAULT_ADMIN_ROLE`, `MANAGER_ROLE` (granted to AgentVault), `PAUSER_ROLE`
-- **`MANAGER_ROLE` scope:** In v2.1, this role is granted to the user's AgentVault instance, not directly to the CDP agent hot wallet. AgentVault then enforces its own hard constraints before forwarding any call to PivotBot.
+- **`MANAGER_ROLE` scope:** In v2.0, this role is granted to the user's AgentVault instance, not directly to the CDP agent hot wallet. AgentVault then enforces its own hard constraints before forwarding any call to PivotBot.
 - **`DEFAULT_ADMIN_ROLE` scope:** Reserved for the bot owner — executes transactions, assigns/revokes roles, pauses/unpauses in emergencies.
 - **`PAUSER_ROLE` scope:** Can only pause and unpause the bot.
 
@@ -140,7 +140,7 @@ Handles:
 
 ---
 
-### 4. AgentVault.sol — Agent Authority Boundary (New in v2.1)
+### 4. AgentVault.sol — Agent Authority Boundary (New in v2.0)
 
 AgentVault is a small Solidity contract that sits between the CDP agent hot wallet and the user's PivotBot instance. Instead of granting `MANAGER_ROLE` directly to the agent's hot wallet — which would give the agent unbounded authority over the bot — the owner grants `MANAGER_ROLE` to their AgentVault. The CDP agent hot wallet is registered inside AgentVault as the executor: it can trigger calls through AgentVault, but it holds no working capital of its own, and every call it makes is validated against four hard constraints before being forwarded.
 
@@ -242,7 +242,7 @@ PivotBot is strictly scoped to the 11 tokens listed on Moonwell's Base deploymen
 
 ---
 
-## V2.1: The Intent Engine & AI Agent Layer
+## V2.0: The Intent Engine & AI Agent Layer
 
 ### Intent Panel Architecture
 
@@ -319,7 +319,7 @@ USDC/wstETH · USDC/cbETH · USDC/rETH · USDC/CBBTC · USDC/WELL · DAI/wstETH 
 
 ---
 
-## V2.1: CDP AgentKit Guardian
+## V2.0: CDP AgentKit Guardian
 
 ### The Liquidation Problem
 
@@ -327,7 +327,7 @@ When a leveraged lending position's health factor drops below 1.0 on Moonwell, t
 
 Approximately 30% of DeFi liquidations occur when the health factor is in the 1.0–1.2 range — a window where an automated 10-minute intervention would prevent the liquidation entirely.
 
-PivotBot v2.1 addresses this with an always-on CDP AgentKit guardian operating through AgentVault.
+PivotBot v2.0 addresses this with an always-on CDP AgentKit guardian operating through AgentVault.
 
 ### Guardian Architecture
 
@@ -362,7 +362,7 @@ Where `collateralFactor_i` is the per-asset liquidation threshold set by Moonwel
 
 ---
 
-## V2.1: PivotProPass — ERC-721 Subscription NFT
+## V2.0: PivotProPass — ERC-721 Subscription NFT
 
 Access to agent execution is gated behind a time-limited ERC-721 NFT called `PivotProPass`.
 
@@ -421,7 +421,7 @@ contract PivotProPass is ERC721 {
 
 ---
 
-## Frontend: Agent Setup UI (New in v2.1)
+## Frontend: Agent Setup UI (New in v2.0)
 
 The `IntentPanel`'s Agent Mode section gains an **Agent Setup card** backed by the `useAgentVault` hook.
 
