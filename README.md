@@ -33,23 +33,23 @@ In practical terms, PivotBot is built for three groups:
 
 ---
 
-## The Problem: Why Current Yield Strategies Fail
+## The Problem with the Current Swing Trading / Leveraged Yield Farming Platforms
 
-If you already farm yield or trade onchain, you usually face one of three bad trade-offs:
+Today, most leveraged trading setups force users into at least one expensive compromise:
 
-### 1. Funding rates drain returns
+### 1. Funding-rate drag erodes returns
 
-Perpetual futures and margin products often charge continuous funding. In a flat market, you can be directionally right and still give away a large part of your return.
+Perpetual futures platforms commonly impose recurring funding payments (often in the 8-20% annualized range, depending on market conditions). In sideways markets, these costs can quietly consume a meaningful share of profits.
 
-### 2. Collateral often sits idle
+### 2. Collateral stays underutilized
 
-On many centralized or manual DeFi workflows, the collateral backing your leverage does not work very hard. You borrow against it, but the setup itself is inefficient and slow.
+On many CEX margin and DeFi perp workflows, collateral is mostly just parked as backing capital. Instead of earning robust supply-side yield, users are often paying to keep exposure open.
 
-### 3. Liquidations happen when no one is watching
+### 3. Custody and counterparty risk remain
 
-Leveraged positions can move from healthy to dangerous quickly. By the time a user notices, the liquidation penalty may already be unavoidable.
+Centralized venues require users to hand over custody. That introduces non-market risk: exchange freezes, operational failure, or hacks can affect access to funds even when the trade thesis is correct.
 
-For many users, the result is predictable: lower yield than expected, too much manual work, or unacceptable liquidation risk.
+**Bottom line:** traders, yield farmers, and DAOs either accept lower net returns, take on avoidable custody risk, or spend substantial time manually managing leverage.
 
 ---
 
@@ -97,11 +97,11 @@ PivotBot is designed so users keep custody while the automation layer stays tigh
 
 This is the execution engine. It handles leverage and deleverage lifecycle logic, Balancer flashloan callbacks, Moonwell supply and borrow operations, and Aerodrome swaps.
 
-### Factory.sol
+### PivotBotFactory.sol
 
 This deploys a dedicated PivotBot instance for each user with CREATE2. Positions are isolated per user rather than pooled together, which prevents fund commingling.
 
-### Manager.sol
+### PivotBotFactoryManager.sol
 
 This contract manages protocol configuration, access roles, fee routing, and the approved token and market set.
 
