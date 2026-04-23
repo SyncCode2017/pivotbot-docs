@@ -1,427 +1,302 @@
-# PivotBot: Autonomous Yield Agent for the Agentic Internet
+# PivotBot: AI-Powered Leveraged Yield for Base
 
-**Non-Custodial Leveraged Yield Agent for Base DeFi — with Autonomous Health Factor Guardian**
+**Non-custodial leveraged yield automation with an autonomous health-factor guardian**
 
-> *Users set intent once. The agent executes, monitors & protects.*
+Set a yield target, choose your market view, and let PivotBot handle leverage, strategy selection, and risk monitoring without giving up custody of your assets.
 
-**Version 2.0 — April 2026**  
+**Version 2.1 - April 2026**  
 **Author:** Abolaji M. Adedeji · Syncedge Solutions  
 **Live App:** [syncedgesolutions.xyz/pivot](https://syncedgesolutions.xyz/pivot)  
+**Technical Overview:** [docs/technical-overview.md](./docs/technical-overview.md)  
+**LinkedIn Article:** [PivotBotV1.0: A Technical Look at Non-Custodial Leveraged Yield](https://linkedin.com/pulse/pivotbot-technical-look-non-custodial-leveraged-yield-adedeji-e2soe)  
+**Demo Video:** [2-minute walkthrough of v1.0](https://youtu.be/ZfPAJjwvWgY?si=oICW7q6mE3kLogGq)  
 **Contact:** abolaji@syncedgesolutions.xyz
 
 ---
 
-## Overview
+## What PivotBot Does
 
-PivotBot is a **Post Web-native, intent-driven autonomous yield agent** deployed on Base that:
+PivotBot is a live yield automation protocol on Base. It helps DeFi users open and manage leveraged lending positions in one atomic flow instead of manually looping supply and borrow transactions.
 
-- **Enables amplified leveraged lending** across Moonwell Base markets in a single atomic transaction using Balancer V2 zero-fee flashloans
-- **Earns supply-side yield** on full leveraged collateral **without paying funding rates** (unlike perpetual futures)
-- **Automates strategy selection** via AI reasoning powered by Coinbase CDP AgentKit based on your yield intent
-- **Continuously monitors** position health 24/7 and auto-deleverages before liquidation strikes
+In practical terms, PivotBot is built for three groups:
 
-**Live Performance:**  
-✓ **+44.97% Net APY** on cbETH/wstETH delta-neutral pair (Health Factor: 1.33)  
-✓ **5× Max Leverage** · **Single Atomic Transaction** · **Zero Funding Rates**  
-✓ **Live on Base Mainnet** since Q1 2026
+- **Yield farmers** who want higher yield on LSTs, BTC, and stablecoins without babysitting positions all day
+- **Crypto traders** who want delta-neutral, long, or short exposure without paying perpetual funding rates
+- **Treasuries and power users** who want non-custodial automation with hard onchain controls around agent behavior
+
+**Live reference point (April 9, 2026):**
+
+- **+44.97% net APY** on cbETH/wstETH
+- **4x leverage**
+- **Health factor: 1.33**
+- **Live on Base mainnet since Q1 2026**
 
 ---
 
-## The Problem
+## The Problem: Why Current Yield Strategies Fail
 
-Traditional leveraged DeFi and margin trading have three critical flaws:
+If you already farm yield or trade onchain, you usually face one of three bad trade-offs:
 
-| Problem                 | Impact                                                                                                                             |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| **8–20% Funding Rates** | Perpetual futures platforms charge continuous funding rates that destroy returns in sideways markets                               |
-| **Zero Capital Yield**  | CEX margin accounts & perp positions earn nothing. Your collateral is idle.                                                        |
-| **No Automation**       | 30% of liquidations occur when health factors are 1.0–1.2 — a 10-minute window where advance intervention could prevent total loss |
+### 1. Funding rates drain returns
 
-**Result:** Retail traders, yield farmers, and DAOs leave massive returns on the table or face sudden liquidation without warning.
+Perpetual futures and margin products often charge continuous funding. In a flat market, you can be directionally right and still give away a large part of your return.
+
+### 2. Collateral often sits idle
+
+On many centralized or manual DeFi workflows, the collateral backing your leverage does not work very hard. You borrow against it, but the setup itself is inefficient and slow.
+
+### 3. Liquidations happen when no one is watching
+
+Leveraged positions can move from healthy to dangerous quickly. By the time a user notices, the liquidation penalty may already be unavoidable.
+
+For many users, the result is predictable: lower yield than expected, too much manual work, or unacceptable liquidation risk.
 
 ---
 
 ## How PivotBot Solves It
 
-### 1. **No Funding Rates** — Earn Yield Instead
+### 1. It uses lending-market leverage instead of perpetual funding
 
-PivotBot uses **lending protocol leverage** (not perpetual futures) so your collateral **generates yield while borrowed**. You pay zero funding rates and earn the spread between supply and borrow APYs — amplified by your chosen leverage.
+PivotBot uses Moonwell lending markets and Balancer flashloans rather than perpetual contracts. That means the strategy is designed around earning supply-side yield on leveraged collateral, not paying recurring funding to stay in position.
 
-**Yield Formula:**
-```
-Avg Net APY Calculation
-= (Supply APY * Supply Value in WETH + WELL APY * WELL Assets Value in WETH − Borrow APY * Borrow Value in WETH) / Total Supply Value in WETH
-```
+### 2. It opens leverage atomically in one transaction
 
-### 2. **Atomic, Single-Transaction Leverage**
+Instead of repeating multiple supply-borrow-swap loops, PivotBot completes the leverage flow atomically:
 
-Unlike traditional "looping" strategies that execute over multiple transactions (exposing you to price swings between loops), PivotBot achieves full target leverage in **one atomic transaction**:
+1. Borrow temporary liquidity from Balancer V2
+2. Supply collateral to Moonwell
+3. Borrow the paired asset
+4. Swap through Aerodrome V2
+5. Repay the flashloan before the transaction ends
 
-```
-1. Request flashloan from Balancer (zero fee)
-2. Supply userDeposit + flashloan to Moonwell
-3. Borrow target asset against new collateral
-4. Swap borrowed asset → flashloan denomination (Aerodrome)
-5. Repay Balancer in same transaction
-   ⚠ Any step fails → entire tx reverts. No partial state.
-```
+If any step fails, the entire transaction reverts. There is no half-open position left behind.
 
-**Gas efficient.** **No liquidation window.** **Instant full leverage.**
+### 3. It lets users express intent instead of building the trade manually
 
-### 3. **Intent-Driven Strategy Selection**
+Users choose:
 
-Instead of manually picking which pair to trade, you express **intent once** — choosing:
 - **Sentiment:** Delta Neutral, Delta Long, or Delta Short
-- **Target APY:** 5–50% range
-- **Risk Tolerance:** Conservative, Moderate, Aggressive
+- **Target APY:** 5% to 100%
+- **Risk tolerance:** Conservative, Moderate, or Aggressive
 
-The **agent reasoning engine** (5 steps) then:
-1. **Parses** your intent
-2. **Filters** 23 strategy pairs to sentiment-matching candidates
-3. **Fetches live Moonwell rates** via on-chain Multicall3
-4. **Checks Aerodrome liquidity** to estimate slippage
-5. **Ranks & scores** by net APY and returns top 3 recommendations
+The strategy engine then filters the available pair universe, fetches live Moonwell rates through Multicall3, checks Aerodrome liquidity, and ranks the best candidates.
 
-You get **data-driven, optimal strategy selection** — not guesswork.
+### 4. It monitors health factor with an AI guardian
 
-### 4. **24/7 Guardian Protection** (CDP AgentKit)
+PivotBot integrates a CDP AgentKit-powered guardian that monitors health factor and can act before liquidation. The default threshold is **1.25**, and the threshold is user-configurable.
 
-A **CDP AgentKit-powered agent** runs continuously, monitoring your position's health factor every block.
-
-- **Default Monitoring:** Health factor < 1.25
-- **User-Configurable:** Set your own liquidation threshold  
-- **Operates through AgentVault:** The guardian's hot wallet is registered as the executor inside the user's AgentVault instance, enforcing balance caps, a function whitelist, cooldowns, and pause controls before any call reaches PivotBot.
-- **Automatic Response:** When triggered, the guardian agent:
-  - Calculates optimal partial or full deleverage
-  - Executes `closePosition()` atomically in a single flashloan tx (via AgentVault)
-  - Restores health factor above safe threshold
-  - Notifies you with full audit trail on-chain
-
-**Non-custodial guarantee maintained:** The guardian can only call `closePosition()` — it cannot open positions, transfer funds outside the close flow, or interact with any contract other than your bot. Position proceeds always return directly to the owner wallet.
+The guardian does not receive broad control over the bot. It operates through a per-user AgentVault that enforces strict onchain constraints before any action reaches PivotBot.
 
 ---
 
-## Architecture: Four-Contract System
+## Why The Architecture Matters
 
-### **PivotBot.sol** — Core Engine
+PivotBot is designed so users keep custody while the automation layer stays tightly bounded.
 
-The main execution contract handling all leverage and deleverage operations.
+### PivotBot.sol
 
-**Key Features:**
-- Balancer V2 `receiveFlashLoan` callback integration
-- Moonwell `CErc20` (mToken) supply, borrow, and redeem operations
-- Aerodrome V2 router for DEX swaps
-- Reentrancy guards on all external entry points
-- Slippage tolerance enforcement
-- Immutable (no upgradeability)
+This is the execution engine. It handles leverage and deleverage lifecycle logic, Balancer flashloan callbacks, Moonwell supply and borrow operations, and Aerodrome swaps.
 
-**Supported Tokens:** 11 Moonwell Base markets
-- **LST (ETH):** cbETH, wstETH, rETH, WeETH
-- **BTC:** cbBTC, LBTC
+### Factory.sol
+
+This deploys a dedicated PivotBot instance for each user with CREATE2. Positions are isolated per user rather than pooled together, which prevents fund commingling.
+
+### Manager.sol
+
+This contract manages protocol configuration, access roles, fee routing, and the approved token and market set.
+
+### AgentVault.sol
+
+This is the authority boundary between the CDP agent hot wallet and the user bot. The agent executes through AgentVault, not directly against PivotBot.
+
+AgentVault enforces four key constraints:
+
+- **Pass validity first:** execution fails immediately if the wallet no longer has an active PivotProPass
+- **Selector whitelist:** only approved execution selectors can be forwarded
+- **Per-transaction spending cap:** owner-defined token spending limits bound each execution
+- **Cooldown and pause controls:** owners can slow or halt execution at any time
+
+### PivotProPass.sol
+
+This is the time-gated subscription NFT used for agent execution access.
+
+### AgentVaultFactory onboarding flow
+
+Vault deployment and pass minting are coordinated atomically so users can set up the guarded automation layer in one flow.
+
+---
+
+## Strategy Universe
+
+PivotBot currently works across **12 Moonwell Base markets**:
+
+- **LSTs:** cbETH, wstETH, rETH, WeETH
+- **BTC assets:** cbBTC, LBTC
 - **Stablecoins:** USDC, DAI
-- **Base Native:** WETH, WELL, AERO
+- **Base-native or protocol assets:** WETH, WELL, AERO, VIRTUAL
 
-**Access Control:** 
-- **Role-based access:** `DEFAULT_ADMIN_ROLE`, `MANAGER_ROLE` (granted to AgentVault), `PAUSER_ROLE`
-- **`MANAGER_ROLE` scope:** In v2.1, this role is granted to the user's AgentVault instance, not directly to the CDP agent hot wallet. AgentVault enforces its own hard constraints before forwarding any call to PivotBot.
-- **`DEFAULT_ADMIN_ROLE` scope:** Role reserved for the bot owner to execute transactions and reconfigure the bot including assigning roles, revoking roles and pausing/unpausing the bot in case of emergency.
-- **`PAUSER_ROLE` scope:** Role can only pause and unpause the bot.
+The strategy engine evaluates **23 core pairs** across three styles:
 
-### **Factory.sol** — Deterministic Deployment
+| Strategy Type     | Count | What It Means                                                                        | Typical User               |
+| ----------------- | ----- | ------------------------------------------------------------------------------------ | -------------------------- |
+| **Delta Neutral** | 8     | Supply and borrow correlated assets to target spread with lower directional exposure | Conservative yield seekers |
+| **Delta Long**    | 8     | Supply ETH or BTC-linked assets and borrow stablecoins                               | Bullish users              |
+| **Delta Short**   | 7     | Supply stablecoins and borrow appreciating assets                                    | Bearish or hedging users   |
 
-Deploys a **unique, per-user bot instance** using `CREATE2`:
-
-```solidity
-bytes32 salt = keccak256(abi.encodePacked(user));
-bot = address(new PivotBot{salt: salt}(user, manager));
-```
-
-**Why per-user?** Each user's collateral and borrow positions are held by their own bot contract. **No commingling of funds.** Non-custodial guarantee: the user's wallet is always the ultimate owner.
-
-### **Manager.sol** — Protocol Contract for Configuration & Fee Routing
-
-Handles:
-- **Role-based access:** `DEFAULT_ADMIN_ROLE`, `MANAGER_ROLE`, `PAUSER_ROLE`
-- **Protocol fee collection:** 0.05% on flashloans + 0.05% on swaps
-- **Token/market whitelist:** Only approved Moonwell tokens accepted
-
-### **AgentVault.sol** — Agent Authority Boundary (New in v2.1)
-
-A per-user intermediary contract that sits between the CDP agent hot wallet and the user's PivotBot instance. Instead of granting `MANAGER_ROLE` directly to the agent's hot wallet, the owner grants it to their AgentVault. The CDP agent operates through AgentVault but is constrained by four hard Solidity-enforced limits:
-
-- **Balance Cap** — Owner sets a maximum WETH and USDC amount the agent can deploy. Bounds maximum agent exposure to a single position's margin.
-- **Function Whitelist** — Only trade execution selectors are permitted. Role management, owner wallet changes, and other calls are rejected at the Solidity level.
-- **Cooldown** — Owner-configurable minimum gap between consecutive executions. Limits damage if the agent hot wallet key is ever compromised.
-- **Pause Flag** — Owner can block all agent execution instantly without revoking roles. A `drain()` function sweeps all WETH, USDC, and ETH dust directly to the owner wallet at any time with no timelock.
-
-**Non-custodial guarantee preserved:** Position proceeds always return directly to the owner wallet. Agent hot wallet is never in the withdrawal path.
+Examples include LST-vs-LST spreads such as cbETH/wstETH, BTC cross-pairs such as cbBTC/LBTC, long setups using ETH or BTC collateral against USDC or DAI debt, and short setups using stablecoins against ETH, BTC, or WELL exposure.
 
 ---
 
-## Strategy Matrix: 23 Trading Pairs
+## PivotProPass: Access Without Custody Risk
 
-### **Delta Neutral (8 pairs)** — Minimal directional risk, earn spread
+PivotProPass is a **soulbound ERC-721 pass** that gates agent execution.
 
-Correlated assets that move together. Profit from APY spread between supply and borrow rates.
+What that means for users:
 
-- cbETH ↔ wstETH ↔ rETH ↔ WeETH (LST cross-pairs)
-- cbBTC ↔ LBTC (BTC cross-pairs)
+- **One pass per wallet**
+- **Non-transferable by design** to avoid secondary-market gaming
+- **Renewals stack remaining time** so early renewal does not waste unused days
+- **Execution access is checked onchain** inside AgentVault before any other execution rule
 
-**Best for:** Conservative yield seekers, APY spread arbitrage
+### Subscription durations
 
-### **Delta Long (8 pairs)** — Bullish directional exposure
+| Tier          | Duration |
+| ------------- | -------- |
+| One Month     | 30 days  |
+| Three Months  | 90 days  |
+| Six Months    | 180 days |
+| Twelve Months | 365 days |
 
-Supply ETH/BTC assets, borrow stablecoins. Upside if ETH/BTC prices appreciate.
+Pricing is USD-denominated and converted to ETH onchain using the Chainlink ETH/USD feed on Base. The pass contract validates stale price data before minting or renewal.
 
-- cbETH/USDC · wstETH/USDC · rETH/USDC · WeETH/USDC
-- cbETH/DAI · wstETH/DAI · cbBTC/USDC · cbBTC/DAI
+### Free usage before subscribing
 
-**Best for:** Bullish traders, LST yield + price upside
-
-### **Delta Short (7 pairs)** — Bearish directional exposure
-
-Supply stablecoins, borrow appreciating assets. Profits if prices fall.
-
-- USDC ↔ wstETH ↔ cbETH ↔ rETH ↔ cbBTC
-- USDC ↔ WELL
-- DAI ↔ wstETH ↔ cbETH
-
-**Best for:** Bearish traders, hedge positions
+Users can access **3 free strategy analyses per calendar month**. Analysis is free, but **agent execution requires an active PivotProPass**.
 
 ---
 
-## Fee Structure
+## Fee Model
 
-| Fee Type             | Rate               | Applies To                                     |
-| -------------------- | ------------------ | ---------------------------------------------- |
-| **Protocol Fee**     | 0.05%              | Flash loan amount on every leverage/deleverage |
-| **Swap Fee**         | 0.05%              | Aerodrome swap amount on every position event  |
-| **PivotProPass NFT** | ETH (per tier)     | Access to agent execution                      |
-| **B2B Licensing**    | Fixed (negotiated) | White-label factory deployments                |
+| Fee Type             | Rate       | Applies To                                   |
+| -------------------- | ---------- | -------------------------------------------- |
+| **Protocol fee**     | 0.05%      | Flashloan amount on leverage and deleverage  |
+| **Swap fee**         | 0.05%      | Aerodrome swap amount during position events |
+| **Subscription fee** | Tier-based | PivotProPass minting and renewal             |
+| **B2B licensing**    | Negotiated | White-label deployments                      |
 
-**Free tier:** Non-subscribers receive **3 free strategy analyses per calendar month**. Only atomic execution requires a pass.
-
----
-
-## PivotProPass: ERC-721 Subscription NFT
-
-Time-limited access to agent execution via an on-chain gated NFT.
-
-### **Subscription Tiers**
-
-| Tier          | Duration | Notes           |
-| ------------- | -------- | --------------- |
-| One Month     | 30 days  | Starter access  |
-| Three Months  | 90 days  | Discounted rate |
-| Twelve Months | 365 days | Best value      |
-
-### **Key Design Features**
-
-- ✓ **One pass per wallet** — enforced at mint
-- ✓ **Renewal stacks remaining time** — early renewals don't lose days
-- ✓ **Transferable** — secondary market buyers inherit remaining time
-- ✓ **On-chain expiry check** — cannot be bypassed via localStorage
-- ✓ **Exact ETH payment** — no partial payments accepted
+Fees route through the protocol treasury via Manager. There is no separate utility token required to use the protocol.
 
 ---
 
-## Live Deployment
+## Live Deployment On Base
 
-### **Base Mainnet Smart Contracts**
+| Contract     | Address                                      | Role                                    |
+| ------------ | -------------------------------------------- | --------------------------------------- |
+| **PivotBot** | `0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3` | Core leverage and deleverage engine     |
+| **Factory**  | `0xc4E537890e86fDD44aF936218f80d7326820d97d` | Per-user bot deployment                 |
+| **Manager**  | `0x144F04807a6af905E3112Fe3Da9302D308c6DF26` | Fee routing, config, and access control |
 
-| Contract     | Address                                      | Role                                  |
-| ------------ | -------------------------------------------- | ------------------------------------- |
-| **PivotBot** | `0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3` | Core leverage/deleverage engine       |
-| **Factory**  | `0xc4E537890e86fDD44aF936218f80d7326820d97d` | Deterministic per-user bot deployment |
-| **Manager**  | `0x144F04807a6af905E3112Fe3Da9302D308c6DF26` | Access control, fee routing, upgrades |
+**Verification and activity:**
 
-**Recent Transaction:**  
-[0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476](https://basescan.org/tx/0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476)
-
-**Verification Links:**
 - [PivotBot on Basescan](https://basescan.org/address/0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3)
 - [Factory on Basescan](https://basescan.org/address/0xc4E537890e86fDD44aF936218f80d7326820d97d)
 - [Manager on Basescan](https://basescan.org/address/0x144F04807a6af905E3112Fe3Da9302D308c6DF26)
-
-**Live App:** https://syncedgesolutions.xyz/pivot
+- [Recent Base transaction](https://basescan.org/tx/0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476)
 
 ---
 
 ## Technology Stack
 
-| Layer                | Technology                                 |
-| -------------------- | ------------------------------------------ |
-| **Smart Contracts**  | Solidity 0.8.33, Foundry                   |
-| **Blockchain**       | Base (Ethereum L2 via OP Stack)            |
-| **Flashloans**       | Balancer V2 (`IVault.flashLoan`)           |
-| **Lending**          | Moonwell Base (Compound V2 fork)           |
-| **DEX**              | Aerodrome V2 (Velodrome fork, Base)        |
-| **Agent Framework**  | CDP AgentKit (Coinbase Developer Platform) |
-| **Agent Wallets**    | CDP Server Wallets (non-custodial)         |
-| **Agent Boundary**   | AgentVault.sol (per-user authority cap)    |
-| **Frontend**         | React, Wagmi, Viem, Tailwind CSS           |
-| **On-chain Queries** | Multicall3 (batched reads)                 |
-| **NFT Standard**     | ERC-721 (OpenZeppelin 5.x)                 |
+| Layer              | Technology                       |
+| ------------------ | -------------------------------- |
+| Smart contracts    | Solidity 0.8.33, Foundry         |
+| Chain              | Base                             |
+| Flashloans         | Balancer V2                      |
+| Lending            | Moonwell Base                    |
+| DEX routing        | Aerodrome V2                     |
+| Agent framework    | CDP AgentKit                     |
+| Agent wallets      | CDP Server Wallets               |
+| Authority boundary | AgentVault                       |
+| Frontend           | React, Wagmi, Viem, Tailwind CSS |
+| Onchain reads      | Multicall3                       |
+| NFT standard       | ERC-721 via OpenZeppelin 5.x     |
 
 ---
 
-## Security
+## Security And Risk Controls
 
-### **Measures in Place**
+### Built-in protections
 
-✓ Reentrancy guard on all external entry points  
-✓ Balancer callback validation (only Balancer Vault can call `receiveFlashLoan`)  
-✓ Token whitelist (only Moonwell Base market tokens accepted)  
-✓ Slippage tolerance enforced atomically  
-✓ No upgradeability on core engine (immutable after deployment)  
-✓ No `delegatecall` used anywhere  
-✓ Checks-Effects-Interactions pattern throughout  
-✓ CDP AgentKit guardian scoped to deleverage only via `MANAGER_ROLE`
+- Reentrancy guards on mutating entry points
+- Balancer callback validation for flashloan execution
+- Approved token and market whitelist
+- Atomic slippage enforcement
+- No delegatecall-based execution path
+- Checks-Effects-Interactions pattern throughout
+- Agent execution restricted by AgentVault rather than direct manager access
+- `drain()` support for owner recovery of WETH, USDC, and ETH dust from AgentVault
 
-### **Testing**
+### Testing status
 
-- **Unit Tests:** Individual function behaviour for all PivotBot entry points
-- **Integration Tests:** Full fork tests against Base mainnet state (Moonwell + Aerodrome + Balancer live contract state)
-- **Fuzz Tests:** Randomised input coverage on leverage parameters, token amounts, and swap paths
+- Unit tests for PivotBot, AgentVault, and PivotProPass behaviors
+- Integration tests against Base mainnet state for Moonwell, Aerodrome, and Balancer
+- Fuzz tests for leverage inputs, swap paths, spending caps, and cooldowns
 
-### **Audit**
+### Audit status
 
-Security audit commissioned **Q2 2026**. Results will be published publicly.
-
----
-
-## Competitive Advantage
-
-| Feature                         | PivotBot | Gearbox   | Alpaca | Euler     | DeFi Perps |
-| ------------------------------- | -------- | --------- | ------ | --------- | ---------- |
-| **Non-custodial**               | ✓        | ⚠ Partial | ✗      | ✓         | ✗          |
-| **Zero funding rate**           | ✓        | ✓         | ✓      | ✓         | ✗          |
-| **Earn yield while leveraged**  | ✓        | ⚠ Partial | ✓      | ✓         | ✗          |
-| **Autonomous agent guardian**   | ✓        | ✗         | ✗      | ✗         | ✗          |
-| **Intent-based strategy**       | ✓        | ✗         | ✗      | ✗         | ✗          |
-| **Atomic no-loop execution**    | ✓        | ✗         | ✗      | ⚠ Partial | ✗          |
-| **Built on Base (Coinbase L2)** | ✓        | ✗         | ✗      | ✗         | ⚠ Partial  |
-| **No token required to use**    | ✓        | ✗         | ✓      | ✗         | ✓          |
-
----
-
-## Market Opportunity
-
-PivotBot sits at the intersection of DeFi's two largest and fastest-growing segments:
-
-### **DeFi Market Growth**
-
-- **Total DeFi TVL:** $130–140B (Early 2026)
-- **DeFi CAGR (2026–2030):** 43.3%
-- **Projected by 2030:** $256B
-- **Yield Farming Revenue:** 36.5% of all DeFi revenue
-
-### **Base Chain Leadership**
-
-- **46.6%** of all Layer 2 DeFi TVL
-- **$5.6B** peak TVL in 2025; **$4B+** current
-- **+180%** daily active addresses YoY (Q1 2026)
-- **$580M/day** Aerodrome DEX volume
-- **#3** Moonwell — lending protocol on Base
-
-### **Target Segments**
-
-| Segment        | TAM                                      |
-| -------------- | ---------------------------------------- |
-| Yield Farmers  | $89B in DeFi lending TVL                 |
-| DeFi Traders   | 20M+ unique DeFi users (2025)            |
-| DAO Treasuries | 11.5% of DeFi TVL (institutional)        |
-| LST Holders    | cbETH, wstETH, rETH seeking yield        |
-| Agent Builders | CDP AgentKit ecosystem (rapidly growing) |
+Security audit is commissioned for **Q2 2026**. AgentVault and PivotProPass are in scope alongside the core protocol.
 
 ---
 
 ## Roadmap
 
-### **Q1 2026** — ✓ LIVE
+### Q1 2026
 
-- ✓ Contracts deployed on Base mainnet
-- ✓ +44.97% APY demonstrated
-- ✓ Balancer forum post published
-- ✓ Live at syncedgesolutions.xyz/pivot
+- Core contracts deployed on Base
+- Live yield demonstration at +44.97% net APY on cbETH/wstETH
+- Public app live at syncedgesolutions.xyz/pivot
 
-### **Q2 2026** — Building
+### Q2 2026
 
-- CDP AgentKit guardian integration
-- Intent panel + agent reasoning UI
-- PivotProPass NFT subscription launch
-- Security audit commissioned
+- Expand guardian and intent UI experience
+- Launch and refine PivotProPass workflows
+- Complete and publish security audit work
 
-### **Q3 2026** — Scale
+### Q3 2026
 
-- Audit complete & published
-- Full agent auto-deleverage live
-- B2B white-label launched
-- Unichain / Optimism deployment
+- Scale B2B white-label deployments
+- Extend to Unichain and OP Mainnet
+- Bring full autonomous deleveraging into wider production use
 
-### **Q4 2026+** — Institutional
+### Q4 2026 and beyond
 
+- Arbitrum deployment
 - Institutional API access
-- Multi-chain TVL $10M target
-- Arbitrum One deployment
-- Governance framework
-- CEX/CeFi partnership integrations
+- Governance and multi-chain expansion
 
 ---
 
+## Resources
 
-## Documentation
-
-- **[Technical Overview](./docs/technical-overview.md)** — Deep dive into contracts, reasoning engine, and guardian architecture
-- **Smart Contract Code** — Available on [Basescan](https://basescan.org)
-- **Live App** — [syncedgesolutions.xyz/pivot](https://syncedgesolutions.xyz/pivot)
-
----
-
-## Key Data & References
-
-### **On-Chain Verification**
-
-All contracts are **verifiable and live on Basescan**:
-
-- [PivotBot Contract](https://basescan.org/address/0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3)
-- [Factory Contract](https://basescan.org/address/0xc4E537890e86fDD44aF936218f80d7326820d97d)
-- [Manager Contract](https://basescan.org/address/0x144F04807a6af905E3112Fe3Da9302D308c6DF26)
-- [Recent Tx](https://basescan.org/tx/0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476)
-
-### **Live Position Data (as of April 9, 2026)**
-
-- **Strategy:** cbETH/wstETH (Delta Neutral)
-- **Net APY:** +44.97%
-- **Supply APY (cbETH):** 11.69%
-- **Borrow APY (wstETH):** 1.02%
-- **Leverage:** 4×
-- **Health Factor:** 1.33 ✓
-
-### **External Resources**
-
-- Moonwell Base Markets — [app.moonwell.fi](https://app.moonwell.fi)
-- Balancer V2 Vault — [docs.balancer.fi](https://docs.balancer.fi/reference/contracts/vault)
-- Aerodrome V2 Router — [aerodrome.finance](https://aerodrome.finance/docs)
-- CDP AgentKit — [developer.coinbase.com/agentkit](https://developer.coinbase.com/agentkit)
-- Compound V2 Risk Model — [docs.compound.finance](https://docs.compound.finance)
+- [Technical Overview](./docs/technical-overview.md)
+- [Live App](https://syncedgesolutions.xyz/pivot)
+- [LinkedIn Article V1.0](https://linkedin.com/pulse/pivotbot-technical-look-non-custodial-leveraged-yield-adedeji-e2soe)
+- [2-minute Demo Video V1.0](https://youtu.be/ZfPAJjwvWgY?si=oICW7q6mE3kLogGq)
+- [Moonwell Base Markets](https://app.moonwell.fi)
+- [Balancer V2 Vault Docs](https://docs.balancer.fi/reference/contracts/vault)
+- [Aerodrome Docs](https://aerodrome.finance/docs)
+- [CDP AgentKit Docs](https://developer.coinbase.com/agentkit)
 
 ---
 
-## Legal & Disclaimers
+## Important Disclaimer
 
-**PivotBot is a non-custodial protocol.** Users retain custody of funds at all times via the per-user bot architecture. Funds are never held by any shared pool or company wallet.
+PivotBot is a **non-custodial protocol**, but leveraged DeFi is still risky. Smart contract risk, liquidation risk, market volatility, oracle issues, and slippage can all affect outcomes.
 
-**This document is for informational purposes only and does not constitute financial advice.** DeFi yield strategies carry risk including but not limited to: smart contract risk, liquidation risk, market risk, and slippage. Always conduct your own research before investing.
+This README is for informational purposes only and should not be treated as financial advice.
 
 ---
-
-## Contact & Support
 
 **Founder:** Abolaji M. Adedeji  
 **Email:** abolaji@syncedgesolutions.xyz  
-**Live App:** https://syncedgesolutions.xyz/pivot  
-
----
-
-*© 2026 Syncedge Solutions · All rights reserved*
+**Company:** Syncedge Solutions

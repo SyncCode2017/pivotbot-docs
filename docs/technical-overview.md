@@ -31,18 +31,27 @@ All contracts are live on Base mainnet and have been operational since Q1 2026. 
 
 ---
 
-## Architecture: Four-Contract System
+## Architecture: Five-Contract System
 
-PivotBot v2.0 uses four contracts working in concert. Factory deploys a PivotBot instance per user. Manager holds protocol-wide configuration and fee routing. AgentVault sits between the CDP agent hot wallet and the user's PivotBot, enforcing hard constraints on what the agent can do and how much capital it can touch. PivotBot is the core execution engine that interacts with Moonwell, Aerodrome, and Balancer.
+PivotBot v2.0 uses five contracts working in concert:
+
+1. **PivotBotFactory** — Deploys a unique PivotBot instance per user (deterministic via CREATE2)
+2. **PivotBotFactoryManager** — Protocol-wide configuration, fee routing, and access control
+3. **PivotBot** — Core leverage/deleverage engine; interacts with Moonwell, Aerodrome, Balancer
+4. **AgentVaultFactory** — Deploys AgentVault instances; coordinates atomic vault + pass deployment
+5. **AgentVault** — Per-user authority boundary; gates agent execution with hard constraints
+6. **PivotProPass** — ERC-721 soulbound subscription NFT; time-gates agent access
 
 ```
 User Wallet
     │
-    ├── owns ──► PivotBot (deployed via Factory)
+    ├── owns ──► PivotBot (deployed via PivotBotFactory)
     │                │
-    │                └── MANAGER_ROLE granted to ──► AgentVault
+    │                └── MANAGER_ROLE granted to ──► AgentVault (deployed via AgentVaultFactory)
     │                                                     │
-    │                                                     └── executor ──► CDP Agent Hot Wallet
+    │                                                     ├── executor ──► CDP Agent Hot Wallet
+    │                                                     │
+    │                                                     └── pass validation ──► PivotProPass
     │
     └── position proceeds always return directly to Owner Wallet
 ```
@@ -109,7 +118,7 @@ User → PivotBot.closePosition(borrowAsset, collateralAsset)
 
 ---
 
-### 2. Factory.sol — Deterministic Deployment
+### 2. PivotBotFactory.sol — Deterministic Deployment
 
 The Factory uses `CREATE2` to deploy a unique PivotBot instance for each user wallet. Each deployed bot is owned exclusively by the user's address.
 
@@ -129,7 +138,7 @@ The `CREATE2` salt is the user's address, so the bot address is predictable befo
 
 ---
 
-### 3. Manager.sol — Protocol Configuration & Fee Routing
+### 3. PivotBotFactoryManager.sol — Protocol Configuration & Fee Routing
 
 Protocol-internal contract for parameter management.
 
@@ -140,7 +149,27 @@ Handles:
 
 ---
 
-### 4. AgentVault.sol — Agent Authority Boundary (New in v2.0)
+### 4. AgentVaultFactory.sol — Vault & Pass Co-deployment (New in v2.0)
+
+AgentVaultFactory is a factory contract that coordinates atomic deployment of AgentVault instances and minting of PivotProPass NFTs. It verifies that the user has already deployed a PivotBot before allowing vault creation.
+
+**Deployment flow:**
+```
+User → AgentVaultFactory.deployMyAgentVault{value: X}(executor, tier)
+  ├─ Verify: User has deployed PivotBot via PivotBotFactory
+  ├─ Verify: User has not already deployed AgentVault
+  ├─ Mint: Call PivotProPass.mintFor{value: X}(user, tier)
+  │   └─ Consumes exact requiredEth; forwards to treasury; no refund
+  ├─ Deploy: new AgentVault(pivotBot, executor, PIVOT_PRO_PASS) with deterministic salt
+  ├─ Record: vault→owner and owner→vault mappings
+  └─ Emit: VaultDeployed event
+```
+
+**Key detail:** AgentVaultFactory uses a simple counter for salt: `salt = bytes32(++vaultsDeployed)`. This makes each vault deployment deterministic but not indexed by user address (unlike PivotBotFactory).
+
+---
+
+### 5. AgentVault.sol — Agent Authority Boundary (New in v2.0)
 
 AgentVault is a small Solidity contract that sits between the CDP agent hot wallet and the user's PivotBot instance. Instead of granting `MANAGER_ROLE` directly to the agent's hot wallet — which would give the agent unbounded authority over the bot — the owner grants `MANAGER_ROLE` to their AgentVault. The CDP agent hot wallet is registered inside AgentVault as the executor: it can trigger calls through AgentVault, but it holds no working capital of its own, and every call it makes is validated against four hard constraints before being forwarded.
 
@@ -155,90 +184,152 @@ AgentVault is a small Solidity contract that sits between the CDP agent hot wall
 
 **Four hard constraints enforced in Solidity:**
 
-**① Balance Cap**  
-The owner sets a maximum WETH amount and a maximum USDC amount that AgentVault is permitted to hold as deployable working capital. If the owner funds it beyond the cap, the excess sits in the contract but cannot be deployed by the agent until the owner explicitly raises the cap. This bounds maximum agent exposure to a single position's margin at target leverage — nothing more.
+**① Per-Transaction Spending Cap**  
+The owner sets a maximum amount for each token (WETH, USDC, or any other) that can be spent in a single agent execution. AgentVault tracks the balance before and after each execution and reverts if the amount spent exceeds the configured cap for that token. This bounds the maximum impact of any single agent action, preventing runaway liquidations or unintended large positions.
 
 ```solidity
-mapping(address => uint256) public caps;   // token → max deployable amount
+mapping(address => uint256) internal spendingCapPerTx;   // token → max spend per tx
 
-modifier withinCap(address token, uint256 amount) {
-    require(amount <= caps[token], "Exceeds agent cap");
-    _;
+// In execute():
+if (spendingToken != address(0)) {
+    balanceBefore = IERC20(spendingToken).balanceOf(address(this));
+    IERC20(spendingToken).approve(PIVOT_BOT, type(uint256).max);
+}
+(bool success, bytes memory returnData) = PIVOT_BOT.call(data);
+if (!success) revert ExecutionFailed(returnData);
+if (spendingToken != address(0)) {
+    IERC20(spendingToken).approve(PIVOT_BOT, 0);
+    balanceAfter = IERC20(spendingToken).balanceOf(address(this));
+    if (balanceBefore - balanceAfter > cap) {
+        revert CapExceeded(spendingToken, balanceBefore - balanceAfter, cap);
+    }
 }
 ```
 
-**② Function Whitelist**  
-AgentVault inspects the calldata selector before forwarding any call to PivotBot. Only two selectors are whitelisted: `openPosition` (supply-with-leverage) and `closePosition` (repay-with-flashloan). Any other function call — including role management, fee changes, or token approvals — is rejected at the Solidity level, not the application layer.
+**② Function Selector Whitelist**  
+AgentVault inspects the 4-byte calldata selector before forwarding any call to PivotBot. Only 9 selectors are whitelisted: `supplyAsset`, `borrowAsset`, `repayBorrow`, `repayBorrowBehalf`, `redeemAssetFromMw`, `repayOrSupplyAssetWithFlashloan`, `swapOnAerodromeV2`, `claimRewards`, and `accrueInterest`. Any other function call — including role management, fee changes, or token approvals — is rejected at the Solidity level, not the application layer.
 
 ```solidity
-bytes4 private constant SET_SLIPPAGE_SELECTOR  = bytes4(keccak256("setSlippageToleranceNumX10k(uint256)"));
-bytes4 private constant SET_DURATION_SELECTOR = bytes4(keccak256("setDuration(uint256)"));
+mapping(bytes4 => bool) internal whitelistedSelectors;
 
-function execute(bytes calldata data) external onlyExecutor notPaused {
-    bytes4 selector = bytes4(data[:4]);
-    require(
-        selector != SET_SLIPPAGE_SELECTOR && selector != SET_DURATION_SELECTOR,
-        "Selector not whitelisted"
-    );
-    (bool ok,) = pivotBot.call(data);
-    require(ok, "PivotBot call failed");
-    lastExecutionTime = block.timestamp;
+// In execute():
+if (data.length < 4) revert CalldataTooShort();
+bytes4 selector = bytes4(data);
+if (!whitelistedSelectors[selector]) revert SelectorNotWhitelisted(selector);
+```
+
+The selectors are initialized once via `initDefaultSelectors()`, which can only be called by the owner:
+
+```solidity
+function initDefaultSelectors() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    if (_selectorsInitialized) revert SelectorsAlreadyInitialized();
+    _selectorsInitialized = true;
+    // 9 whitelisted MANAGER_ROLE functions
+    whitelistedSelectors[bytes4(keccak256('supplyAsset(address,uint256)'))] = true;
+    whitelistedSelectors[bytes4(keccak256('borrowAsset(address,uint256)'))] = true;
+    // ... and 7 more
 }
 ```
 
-**③ Cooldown**  
+**③ Cooldown Between Executions**  
 The owner sets a minimum gap in seconds between consecutive executions. Even if the agent hot wallet key is compromised and an attacker attempts to loop positions at speed, the cooldown limits execution frequency to one call per interval. The cooldown applies per AgentVault instance and is adjustable by the owner at any time.
 
 ```solidity
 uint256 public cooldown;
 uint256 public lastExecutionTime;
 
-modifier respectsCooldown() {
-    require(block.timestamp >= lastExecutionTime + cooldown, "Cooldown active");
-    _;
+// In execute():
+if (block.timestamp < lastExecutionTime + cooldown) {
+    revert CooldownActive(lastExecutionTime + cooldown);
+}
+lastExecutionTime = block.timestamp;
+```
+
+**④ Pause Flag & Pass Validity Check**  
+The owner can pause AgentVault at any time with a single transaction. While paused, all agent execution is blocked. Additionally, every call to `execute()` performs a **pass validity check first** — before any other constraint:
+
+```solidity
+function execute(bytes calldata data, address spendingToken) 
+    external whenNotPaused nonReentrant onlyRole(EXECUTOR_ROLE) returns (bytes memory) 
+{
+    // ⭐ First check: Pass validity (before selector, cooldown, cap checks)
+    if (!IPivotProPass(PIVOT_PRO_PASS).isActive(AGENT_VAULT_FACTORY.getVaultOwner(address(this)))) revert PassRequired();
+    
+    // Then proceed with remaining constraints...
 }
 ```
 
-**④ Pause Flag**  
-The owner can pause AgentVault at any time with a single transaction. While paused, all agent execution is blocked. Critically, pausing AgentVault does not affect PivotBot's `MANAGER_ROLE` assignment — the owner does not need to revoke and re-grant roles to pause and resume agent operation. Unpausing re-enables execution immediately.
+If the owner's PivotProPass has expired, `execute()` reverts immediately with `PassRequired()`. The owner must renew their subscription before agent execution can proceed.
+
+Critically, pausing AgentVault does not affect PivotBot's `MANAGER_ROLE` assignment — the owner does not need to revoke and re-grant roles to pause and resume agent operation. Unpausing re-enables execution immediately (assuming the pass is still valid).
 
 **Owner control functions:**
 
-| Function                                | Description                                                                                    |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `setExecutor(address)`                  | Rotates the CDP agent hot wallet address without redeployment                                  |
-| `setCap(address token, uint256 amount)` | Adjusts the deployable cap for WETH or USDC                                                    |
-| `setCooldown(uint256 seconds)`          | Updates the minimum gap between executions                                                     |
-| `pause()` / `unpause()`                 | Blocks or re-enables all agent execution                                                       |
-| `drain()`                               | Sweeps all WETH, USDC, and ETH dust to owner wallet instantly — no delay, no agent involvement |
+| Function                                       | Description                                                                       |
+| ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| `updateOwnerWallet(address _newWallet)`        | Rotates the owner/subscription holder wallet (principal identity for pass checks) |
+| `setSpendingCapPerTx(address token, uint256)`  | Sets the per-transaction spend limit for a specific token (WETH, USDC, etc.)      |
+| `setCooldown(uint256 seconds)`                 | Updates the minimum gap (in seconds) between consecutive executions               |
+| `initDefaultSelectors()`                       | One-time initialization of the 9 whitelisted function selectors                   |
+| `setWhitelistedSelector(bytes4, bool)`         | Adds or removes specific function selectors from the whitelist                    |
+| `pause()` / `unpause()`                        | Blocks or re-enables all agent execution (pass remains valid; just blocks calls)  |
+| `withdrawToken(address token, uint256 amount)` | Withdraws a specific ERC-20 token balance to owner wallet                         |
+| `withdrawEther(uint256 amount)`                | Withdraws ETH balance to owner wallet                                             |
+| `drain()`                                      | Sweeps all WETH, USDC, and ETH dust to owner wallet in a single atomic call       |
 
-**Drain guarantee:** The `drain()` function transfers 100% of WETH, USDC, and any ETH dust held in AgentVault directly to the registered owner wallet in a single call. There is no timelock, no agent approval required, and no dependency on PivotBot state. The owner can drain at any time regardless of whether any positions are open.
+**Drain guarantee:** The `drain()` function transfers 100% of WETH, USDC, and any ETH held in AgentVault directly to the registered owner wallet in a single atomic call. There is no timelock, no agent approval required, and no dependency on PivotBot state:
+
+```solidity
+function drain() external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
+    uint256 wethBalance = IERC20(WETH).balanceOf(address(this));
+    uint256 usdcBalance = IERC20(USDC).balanceOf(address(this));
+    uint256 ethBalance = address(this).balance;
+
+    if (wethBalance > 0) {
+        IERC20(WETH).transfer(_ownerWallet, wethBalance);
+    }
+    if (usdcBalance > 0) {
+        IERC20(USDC).transfer(_ownerWallet, usdcBalance);
+    }
+    if (ethBalance > 0) {
+        (bool success, ) = payable(_ownerWallet).call{value: ethBalance}('');
+        if (!success) revert WithdrawalFailed();
+    }
+
+    emit Drained(_ownerWallet, wethBalance, usdcBalance, ethBalance);
+}
+```
+
+The owner can drain at any time regardless of whether any positions are open or if the pass is expired.
 
 **Non-custodial guarantee preserved:** When PivotBot closes a position or redeems collateral, proceeds are sent directly to the registered owner wallet — exactly as in v2.0. AgentVault is never in the withdrawal path. The only funds inside AgentVault at any time are the working capital the owner has explicitly deposited as agent margin.
 
-**Maximum loss bound:** The maximum loss from a compromised agent hot wallet key is bounded by `caps[WETH]` and `caps[USDC]` — the amounts the owner configured. These should be sized to cover a single position's margin at maximum leverage, nothing more. Position collateral held in Moonwell via PivotBot is not accessible to AgentVault or the agent hot wallet.
+**Maximum loss bound:** The maximum loss from a compromised agent hot wallet key is bounded by a small amount of ETH held in the agent's hot wallet for transaction fees. The agent can only *execute* positions through AgentVault—it cannot withdraw tokens from AgentVault (no `withdraw()` function accessible to executor role). Even if a position moves into loss:
+- The CDP Guardian monitors health factor continuously
+- If health factor drops below threshold (default: 1.25), the guardian auto-deleverages via AgentVault.execute()
+- AgentVault enforces cooldown, selector whitelist, and spending cap on every call
+- Position collateral held in Moonwell via PivotBot is never accessible to AgentVault or the agent hot wallet
 
 ---
 
 ## Token Universe (Moonwell Base Markets Only)
 
-PivotBot is strictly scoped to the 11 tokens listed on Moonwell's Base deployment:
+PivotBot is strictly scoped to the 12 tokens listed on Moonwell's Base deployment:
 
-| Token  | Type       | Role in Strategies             |
-| ------ | ---------- | ------------------------------ |
-| CBETH  | LST (ETH)  | Supply (Neutral/Long)          |
-| WSTETH | LST (ETH)  | Supply/Borrow (Neutral)        |
-| RETH   | LST (ETH)  | Supply/Borrow (Neutral)        |
-| WeETH  | LST (ETH)  | Supply (Neutral)               |
-| CBBTC  | BTC        | Supply/Borrow (Neutral/Long)   |
-| LBTC   | BTC        | Supply/Borrow (Neutral)        |
-| USDC   | Stablecoin | Supply (Short) / Borrow (Long) |
-| DAI    | Stablecoin | Supply (Short) / Borrow (Long) |
-| WETH   | ETH        | Supply/Borrow                  |
-| WELL   | Protocol   | Borrow (Short)                 |
-| AERO   | Protocol   | Supply/Borrow                  |
-
-**WRSETH and tBTC are explicitly excluded** — they are not present on Moonwell Base.
+| Token   | Type       | Role in Strategies             |
+| ------- | ---------- | ------------------------------ |
+| CBETH   | LST (ETH)  | Supply (Neutral/Long)          |
+| WSTETH  | LST (ETH)  | Supply/Borrow (Neutral)        |
+| RETH    | LST (ETH)  | Supply/Borrow (Neutral)        |
+| WeETH   | LST (ETH)  | Supply (Neutral)               |
+| CBBTC   | BTC        | Supply/Borrow (Neutral/Long)   |
+| LBTC    | BTC        | Supply/Borrow (Neutral)        |
+| USDC    | Stablecoin | Supply (Short) / Borrow (Long) |
+| DAI     | Stablecoin | Supply (Short) / Borrow (Long) |
+| WETH    | ETH        | Supply/Borrow                  |
+| WELL    | Protocol   | Borrow (Short)                 |
+| AERO    | Protocol   | Supply/Borrow                  |
+| VIRTUAL | Protocol   | Supply/Borrow                  |
 
 ---
 
@@ -253,7 +344,7 @@ Users interact through an `IntentPanel` component with three inputs:
    - **Delta Long:** Supply ETH/BTC assets, borrow stablecoins. Upside exposure if ETH/BTC appreciate.
    - **Delta Short:** Supply stablecoins, borrow appreciating assets. Profits if prices fall.
 
-2. **Target APY slider** — 5% to 50% range
+2. **Target APY slider** — 5% to 100% range
 
 3. **Risk tolerance** — Conservative / Moderate / Aggressive (maps to leverage multiplier ceiling and drawdown budget)
 
@@ -306,13 +397,13 @@ Applies drawdown proxy by sentiment:
 
 Returns top 3 ranked strategies with full APY breakdown.
 
-### Full Strategy Matrix (23 Pairs)
+### Full Strategy Matrix (25 Pairs)
 
 **Delta Neutral (8 pairs):**  
 cbETH/wstETH · cbETH/rETH · cbETH/WeETH · wstETH/rETH · wstETH/WeETH · rETH/WeETH · cbBTC/LBTC · CBBTC/LBTC
 
 **Delta Long (8 pairs):**  
-cbETH/USDC · wstETH/USDC · rETH/USDC · WeETH/USDC · cbETH/DAI · wstETH/DAI · CBBTC/USDC · CBBTC/DAI · All Delta Neutral Pairs
+cbETH/USDC · wstETH/USDC · rETH/USDC · WeETH/USDC · cbETH/DAI · wstETH/DAI · CBBTC/USDC · CBBTC/DAI · VIRTUAL/USDC · All Delta Neutral Pairs
 
 **Delta Short (7 pairs):**  
 USDC/wstETH · USDC/cbETH · USDC/rETH · USDC/CBBTC · USDC/WELL · DAI/wstETH · DAI/cbETH
@@ -364,60 +455,249 @@ Where `collateralFactor_i` is the per-asset liquidation threshold set by Moonwel
 
 ## V2.0: PivotProPass — ERC-721 Subscription NFT
 
-Access to agent execution is gated behind a time-limited ERC-721 NFT called `PivotProPass`.
+Access to agent execution is gated behind a soulbound (non-transferable) time-limited ERC-721 NFT called `PivotProPass`. The pass is minted atomically alongside AgentVault deployment, funded with ETH sent by the user. Pricing is USD-denominated; real-time ETH conversion is calculated via Chainlink oracle (ETH/USD on Base). Revenue from all subscriptions and renewals flows immediately to the protocol treasury (`protocolFeeRecipient` on PivotBotFactoryManager) — PivotProPass never custodies ETH.
 
-### Smart Contract Design
+### Design Rationale: Why Co-deployed with AgentVault?
+
+- **Atomic onboarding:** User deploys vault + subscribes to agent access in a single transaction
+- **Simplified UX:** No separate "buy a pass then deploy vault" flow
+- **Aligned incentives:** Vault owner has an active subscription at deployment time
+- **Revenue efficiency:** Treasury receives payment immediately; no custody risk
+
+### Deployment Architecture
+
+```
+User Wallet
+    │
+    └─ calls AgentVaultFactory.deployMyAgentVault{value: X}(executor, tier)
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+           1. Query Chainlink  2. Deploy AgentVault  3. Mint Pass
+                    │               │               │
+           requiredEth =        new AgentVault    PivotProPass.mintFor
+           (tierPriceUsd        (pivotBot,         {value: X}
+            * 1e18) /            owner,             ├─ Validate owner has no prior pass
+            ethUsdPrice          executor,          ├─ requiredEth = getRequiredEth(tier)
+                                 PASS_ADDR)        ├─ Update state: tokenOf[owner] = tokenId
+           if X != required                         ├─ Update state: expiryOf[tokenId] = now + duration
+           → revert                                ├─ _mint(owner, tokenId)
+           InsufficientEth                         ├─ Forward requiredEth →
+                                                   │   FACTORY_MANAGER.protocolFeeRecipient()
+                                                  
+```
+
+All three operations are atomic within the AgentVaultFactory — if any step fails, the entire transaction reverts with no partial state.
+
+### Chainlink Integration
+
+PivotProPass maintains a live link to Chainlink's ETH/USD price feed on Base (`0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70`, 8 decimals). The contract is initialized with four parameters:
 
 ```solidity
-contract PivotProPass is ERC721 {
-    enum Tier { ONE_MONTH, THREE_MONTHS, TWELVE_MONTHS }
+constructor(address _factoryManager, address _vaultFactory, address _priceFeed, uint256 _staleThreshold)
+```
 
-    mapping(uint256 => uint256) public expiryOf;   // tokenId → expiry timestamp
-    mapping(address => uint256) public tokenOf;    // address → tokenId (one per wallet)
+On every `mintFor()` and `renew()` call, the contract:
 
-    function mint(Tier tier) external payable {
-        require(tokenOf[msg.sender] == 0, "One pass per wallet");
-        require(msg.value == tierPrices[tier], "Exact ETH required");
-        uint256 tokenId = ++_nextTokenId;
-        expiryOf[tokenId] = block.timestamp + tierDurations[tier];
-        tokenOf[msg.sender] = tokenId;
-        _mint(msg.sender, tokenId);
-        emit PassMinted(msg.sender, tokenId, tier, expiryOf[tokenId]);
-    }
+1. **Fetches latest price:** `(, int256 answer, , uint256 updatedAt, ) = PRICE_FEED.latestRoundData()`
+2. **Validates staleness:** Revert if `block.timestamp - updatedAt > staleThreshold` (default: 60 seconds)
+3. **Validates answer:** Revert if `answer <= 0`
+4. **Calculates ETH equivalent:** 
+   ```
+   requiredEth = (tierPriceUsd * 1e18) / uint256(answer)
+   ```
+   Example: $30 USD price, ETH/USD at 2,000 → 30_00000000 * 1e18 / 2000_00000000 = 0.015 ETH
 
-    function renew(Tier tier) external payable {
-        uint256 tokenId = tokenOf[msg.sender];
-        require(tokenId != 0, "No active pass");
-        require(msg.value == tierPrices[tier], "Exact ETH required");
-        // Stacks remaining time — users who renew early don't lose days
-        uint256 base = max(expiryOf[tokenId], block.timestamp);
-        expiryOf[tokenId] = base + tierDurations[tier];
-        emit PassRenewed(msg.sender, tokenId, tier, expiryOf[tokenId]);
-    }
+The `staleThreshold` is configurable by protocol owner via `setStaleThreshold(uint256)`, allowing adjustment as feed update intervals change. Default is 60 seconds.
 
-    function isActive(address user) external view returns (bool) {
-        uint256 tokenId = tokenOf[user];
-        return tokenId != 0 && expiryOf[tokenId] > block.timestamp;
-    }
+### Revenue Routing — No Custodial Risk
+
+**Critical distinction:** PivotProPass never custodies ETH. Payments are validated, state is updated, then ETH is immediately forwarded using the CEI pattern (Checks-Effects-Interactions):
+
+```solidity
+function mintFor(address user, Tier tier) external payable noZeroAddress(user) {
+    // Checks: Verify authorization and preconditions
+    if (msg.sender != AGENT_VAULT_FACTORY_ADDRESS) revert Unauthorized();
+    if (tokenOf[user] != 0) revert OnePassPerWallet();
+
+    uint256 requiredEth = getRequiredEth(tier);
+    if (msg.value != requiredEth) revert InsufficientEth(requiredEth, msg.value);
+
+    // Effects: Update state first
+    uint256 tokenId = ++_nextTokenId;
+    uint256 expiry = block.timestamp + tierDuration[tier];
+    expiryOf[tokenId] = expiry;
+    tokenOf[user] = tokenId;
+
+    // Interactions: Forward ETH to protocol treasury (read live)
+    address treasury = FACTORY_MANAGER.protocolFeeRecipient();
+    (bool ok, ) = payable(treasury).call{value: requiredEth}('');
+    if (!ok) revert TransferFailed();
+
+    emit PassMinted(user, tokenId, tier, expiry, requiredEth);
+    _safeMint(user, tokenId);
 }
 ```
 
-**Key design decisions:**
-- **One pass per wallet** enforced at mint
-- **Renewal stacks remaining time** — prevents churn by removing the cost of early renewal
-- **Transferable with time inheritance** — expiry follows the tokenId, not the wallet
-- **On-chain expiry check** — `usePivotPro` hook calls `isActive()` on every execution attempt; cannot be bypassed via localStorage
-- **Exact ETH payment** — reverts on incorrect value
+**Key properties:**
+- Only AgentVaultFactory can call `mintFor()` (authorization check)
+- User must send exactly `requiredEth` (no overpayment, no refunds)
+- Minting fails atomically if any step fails
+- Zero ETH custodied in PivotProPass at any time
+- Revenue routing automatically follows `protocolFeeRecipient` changes on PivotBotFactoryManager (read live on every mint)
+- No separate withdrawal function or governance delay needed
 
-**Subscription tiers:**
+### Subscription Tiers & Pricing
 
-| Tier          | Duration | Notes           |
-| ------------- | -------- | --------------- |
-| One Month     | 30 days  | Starter access  |
-| Three Months  | 90 days  | Discounted rate |
-| Twelve Months | 365 days | Best value      |
+| Tier          | Duration | USD Price (placeholder) | Use Case                            |
+| ------------- | -------- | ----------------------- | ----------------------------------- |
+| ONE_MONTH     | 30 days  | $10.00                  | Trial; short-term strategies        |
+| THREE_MONTHS  | 90 days  | $25.00                  | Standard operational pass           |
+| SIX_MONTHS    | 180 days | $45.00                  | Medium-term commitments             |
+| TWELVE_MONTHS | 365 days | $80.00                  | Best value; year-round agent access |
 
-**Free tier:** Non-subscribers receive 3 free strategy analyses per calendar month. Analysis (intent → reasoning → recommendation) is always free; atomic execution requires a pass. The monthly counter is tracked in localStorage — no security implication, as the execution gate is enforced on-chain.
+Prices are stored on-chain as 8-decimal USD amounts (matching Chainlink decimals). Protocol owner calls `setTierPriceUsd(Tier, uint256)` to adjust pricing post-launch. ETH equivalents are always computed live from Chainlink to reflect market conditions.
+
+### Key Design Decisions
+
+**1. Soulbound (Non-Transferable)**
+- Prevents secondary market gaming (mint, use, resell within 1 hour)
+- Eliminates complexity of maintaining `tokenOf` mappings during transfers
+- Aligns subscription with wallet identity — each wallet holds at most one pass
+- If user switches wallets, they deploy new PivotBot, deploy new AgentVault and  mint a fresh pass from the new wallet; old pass stays dormant
+
+**2. Time Stacking on Renewal**
+- Caller holds a tokenId and calls `renew(tier)` with payment
+- New expiry = `max(expiryOf[tokenId], block.timestamp) + tierDuration[tier]`
+- Users who renew early do not lose unused days
+- Stale renewals (after expiry) stack from block.timestamp, preventing unbounded time accumulation
+
+**3. Pass Check in AgentVault.execute()**
+- **First check (before selector whitelist, cooldown, cap):** `if (!IPivotProPass(PIVOT_PRO_PASS).isActive(AGENT_VAULT_FACTORY.getVaultOwner(address(this)))) revert PassRequired();`
+- Retrieves vault owner dynamically from AgentVaultFactory (single source of truth)
+- Not stored as a local variable; read on each execution
+- Fail-fast semantics: expired passes block execution immediately with explicit `PassRequired()` error
+
+**4. One Pass Per Wallet Enforcement**
+- `tokenOf[address]` mapping prevents multiple mints to same wallet
+- Checked at mint time; soulbound property preserves invariant through lifecycle
+
+### Payment Flow Diagram
+
+```
+SCENARIO A: AgentVault Deployment (Initial Mint)
+─────────────────────────────────────────────────
+User Wallet ──{ETH: X}──> AgentVaultFactory.deployMyAgentVault(executor, tier)
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    │                     │                     │
+              1. Check ETH    2. Deploy AgentVault   3. Mint Pass
+                    │                     │                     │
+              required = 0.015        new AgentVault    PivotProPass.mintFor
+            if X != required         (pivotBot, user,   {value: 0.015}
+              → revert                 executor,         ├─ _mint(user, tokenId)
+                                       PASS_ADDR)        ├─ Forward 0.015 → treasury
+                                                         
+                    
+```
+
+```
+SCENARIO B: Renewal (Any Time, User Initiated)
+──────────────────────────────────────────────
+User Wallet ──{ETH: Y}──> PivotProPass.renew(tier)
+                               │
+                   ┌───────────┼───────────┐
+                   │           │           │
+              1. Validate  2. Stack Time  3. Forward ETH
+                   │           │           │
+           tokenOf[user] != 0   │     address treasury =
+           Y >= required   expiryOf =   FACTORY_MANAGER
+                           max(old, now) .protocolFeeRecipient()
+                           + duration    Forward Y → treasury
+                                         Refund excess to user
+```
+
+### Pass Status & Execution Gate
+
+When a CDP agent executor calls `AgentVault.execute()`, the function enforces all four constraints in strict sequence:
+
+```solidity
+function execute(bytes calldata data, address spendingToken) 
+    external whenNotPaused nonReentrant onlyRole(EXECUTOR_ROLE) returns (bytes memory) 
+{
+    // ① Pass validity check (FIRST, before any other execution logic)
+    if (!IPivotProPass(PIVOT_PRO_PASS).isActive(AGENT_VAULT_FACTORY.getVaultOwner(address(this)))) 
+        revert PassRequired();
+
+    // ② Calldata and selector validation
+    if (data.length < 4) revert CalldataTooShort();
+    bytes4 selector = bytes4(data);
+    if (!whitelistedSelectors[selector]) revert SelectorNotWhitelisted(selector);
+
+    // ③ Cooldown enforcement
+    if (block.timestamp < lastExecutionTime + cooldown) {
+        revert CooldownActive(lastExecutionTime + cooldown);
+    }
+
+    // Update last execution time
+    lastExecutionTime = block.timestamp;
+    
+    // ④ Pre-execution: Track spending token balance
+    uint256 balanceBefore;
+    uint256 balanceAfter;
+    if (spendingToken != address(0)) {
+        balanceBefore = IERC20(spendingToken).balanceOf(address(this));
+        IERC20(spendingToken).approve(PIVOT_BOT, type(uint256).max);
+    }
+    
+    // Execute the call to PivotBot
+    (bool success, bytes memory returnData) = PIVOT_BOT.call(data);
+    if (!success) revert ExecutionFailed(returnData);
+    
+    // ④ Post-execution: Verify spending cap not exceeded
+    if (spendingToken != address(0)) {
+        IERC20(spendingToken).approve(PIVOT_BOT, 0);
+        balanceAfter = IERC20(spendingToken).balanceOf(address(this));
+        uint256 cap = spendingCapPerTx[spendingToken];
+        if (balanceBefore - balanceAfter > cap) {
+            revert CapExceeded(spendingToken, balanceBefore - balanceAfter, cap);
+        }
+    }
+    
+    emit Executed(msg.sender, selector, returnData);
+    return returnData;
+}
+```
+
+**Constraint enforcement sequence:**
+1. **Pass validity (first):** Query AgentVaultFactory for vault owner, check if their PivotProPass is active. Reverts with `PassRequired()` if expired or inactive.
+2. **Selector validation:** The 4-byte function selector must be in the whitelist. Reverts with `SelectorNotWhitelisted()` if not.
+3. **Cooldown:** Minimum gap since last execution must have elapsed. Reverts with `CooldownActive()` if not.
+4. **Spending cap (post-execution):** If `spendingToken` is not `address(0)`, measure token balance before and after the PivotBot call. Reverts with `CapExceeded()` if the amount spent exceeds `spendingCapPerTx[spendingToken]`.
+
+**Fail-fast guarantee:** If any constraint fails, the entire transaction reverts atomically. No partial state or side effects. If all constraints pass, the call proceeds and the result (success or failure from PivotBot) is returned to the executor.
+
+### Free Tier (Frontend Only)
+
+Non-pass-holders can access **3 free strategy analyses per calendar month**. This is a frontend-only feature (localStorage-tracked) and does **not** bypass the on-chain execution gate:
+- **Analysis** (intent → reasoning → recommendation): Always free
+- **Atomic execution** (openPosition / closePosition on PivotBot): Requires active PivotProPass
+
+Free analyses cannot be used to execute positions; they are purely informational.
+
+### Implementation Scope
+
+| Component                    | Location                                          | Status     |
+| ---------------------------- | ------------------------------------------------- | ---------- |
+| PivotProPass contract        | `src/PivotProPass.sol`                            | ✅ Complete |
+| IPivotProPass interface      | `src/interfaces/IPivotProPass.sol`                | ✅ Complete |
+| Chainlink interface (copied) | `src/interfaces/AggregatorV3Interface.sol`        | ✅ Complete |
+| AgentVaultFactory updates    | `src/AgentVaultFactory.sol`                       | ✅ Complete |
+| AgentVault updates           | `src/AgentVault.sol`                              | ✅ Complete |
+| Deployment script            | `script/DeployPivotProPass.s.sol`                 | ✅ Complete |
+| Mock for testing             | `test/mocks/MockPivotProPass.sol`                 | ✅ Complete |
+| Unit tests                   | `test/PivotProPass.t.sol`                         | ✅ Complete |
+| Integration tests            | `test/AgentVaultFactoryPivotProIntegration.t.sol` | ✅ Complete |
 
 ---
 
@@ -429,17 +709,21 @@ The `IntentPanel`'s Agent Mode section gains an **Agent Setup card** backed by t
 
 The card surfaces all AgentVault state and controls in one place:
 
-| Display                   | Description                                                 |
-| ------------------------- | ----------------------------------------------------------- |
-| AgentVault address        | The deployed contract address for this user                 |
-| Executor address          | The currently registered CDP agent hot wallet               |
-| WETH balance / cap        | Current holdings vs. the owner-set deployable cap           |
-| USDC balance / cap        | Current holdings vs. the owner-set deployable cap           |
-| Cooldown setting          | Minimum seconds between executions                          |
-| Time since last execution | Live countdown to next permitted execution                  |
-| Pause / Resume toggle     | Blocks or re-enables all agent execution                    |
-| Drain All button          | Sweeps WETH, USDC, and ETH dust to owner wallet immediately |
-| Fund Agent form           | Transfers working capital from user's wallet to AgentVault  |
+| Display                     | Description                                                         |
+| --------------------------- | ------------------------------------------------------------------- |
+| AgentVault address          | The deployed contract address for this vault                        |
+| Vault owner (from factory)  | The principal wallet; used to check PivotProPass validity on calls  |
+| WETH spending cap per tx    | Current max spend per transaction for WETH                          |
+| USDC spending cap per tx    | Current max spend per transaction for USDC                          |
+| Cooldown setting (seconds)  | Minimum gap (in seconds) between consecutive agent executions       |
+| Last execution timestamp    | Unix timestamp of most recent agent execution                       |
+| Next execution available at | Countdown (seconds remaining) until next execution is permitted     |
+| Pause status                | Whether execution is currently paused (pause() called)              |
+| PivotProPass expiry         | Owner's pass expiry timestamp; execution blocks if expired          |
+| Pass active status          | Real-time boolean: is owner's pass currently valid and non-expired? |
+| Drain All button            | Sweeps WETH, USDC, and ETH dust to owner wallet atomically          |
+| Update spending cap form    | Adjusts per-tx cap for WETH or USDC independently                   |
+| Update cooldown form        | Adjusts cooldown interval (in seconds)                              |
 
 ### `useAgentVault` Hook
 
@@ -447,20 +731,32 @@ Reads all AgentVault state in a single Multicall3 batch:
 
 ```javascript
 const calls = [
-  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'executor') },
-  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'caps', [WETH]) },
-  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'caps', [USDC]) },
+  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'getCurrentOwnerWallet') },
+  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'getSpendingCapPerTx', [WETH]) },
+  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'getSpendingCapPerTx', [USDC]) },
   { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'cooldown') },
   { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'lastExecutionTime') },
   { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'paused') },
+  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'getNextExecutionTime') },
+  { target: agentVaultAddress, callData: encodeFunctionData(ABI, 'isInitialized') },
   { target: WETH, callData: encodeFunctionData(ERC20_ABI, 'balanceOf', [agentVaultAddress]) },
   { target: USDC, callData: encodeFunctionData(ERC20_ABI, 'balanceOf', [agentVaultAddress]) },
+  { target: PIVOT_PRO_PASS, callData: encodeFunctionData(PASS_ABI, 'isActive', [vaultOwner]) },
+  { target: PIVOT_PRO_PASS, callData: encodeFunctionData(PASS_ABI, 'expiryOf', [PIVOT_PRO_PASS.tokenOf(vaultOwner)]) },
 ];
 ```
 
-Exposes write functions: `setExecutor`, `setCap`, `setCooldown`, `pause`, `unpause`, `drain`, and `fund`.
+Exposes write functions (for vault owner only):
+- `setSpendingCapPerTx(token, amount)` — Update per-tx cap for a token
+- `setCooldown(seconds)` — Update cooldown interval
+- `pause()` / `unpause()` — Block/unblock agent execution
+- `drain()` — Sweep all WETH, USDC, ETH to owner wallet
+- `withdrawToken(token, amount)` — Withdraw specific token balance
+- `withdrawEther(amount)` — Withdraw ETH balance
+- `setWhitelistedSelector(bytes4, bool)` — Add/remove function selectors
+- `initDefaultSelectors()` — One-time initialization of 9 default selectors
 
-The `AGENT_VAULT_ABI` is added to the constants file alongside the existing `NFT_ABI` and `AERODROME_ABI`.
+The `AGENT_VAULT_ABI`, `PASS_ABI`, and `AGENT_VAULT_FACTORY_ABI` are added to the constants file alongside the existing `NFT_ABI` and `AERODROME_ABI`.
 
 ---
 
@@ -492,10 +788,12 @@ Fees flow to the protocol treasury via Manager. No token required to use the pro
 - No `delegatecall` used anywhere
 - Token input validation against approved registry (Manager whitelist)
 - Slippage tolerance enforced atomically — position reverts rather than executing at unfavourable rates
-- CDP AgentKit guardian scoped to two selectors only via AgentVault whitelist
+- CDP AgentKit guardian scoped to only owner-whitelisted selectors via AgentVault (execute role only)
 - AgentVault `drain()` has no timelock and requires no agent involvement
+- PivotProPass pass check runs **first** in AgentVault.execute() before any other constraint (fail-fast)
+- AgentVault authorization: executor role cannot call `drain()`, `setSpendingCapPerTx()`, `setCooldown()`, or any config functions — only owner (DEFAULT_ADMIN_ROLE)
 
-**Security audit:** Commissioned Q2 2026. Results will be published publicly. AgentVault is in scope.
+**Security audit:** Commissioned Q2 2026. Results will be published publicly. AgentVault and PivotProPass are in scope.
 
 ---
 
@@ -537,7 +835,7 @@ All contracts can be verified on Basescan:
 - **PivotBot:** https://basescan.org/address/0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3
 - **Factory:** https://basescan.org/address/0xc4E537890e86fDD44aF936218f80d7326820d97d
 - **Manager:** https://basescan.org/address/0x144F04807a6af905E3112Fe3Da9302D308c6DF26
-- **Deployment tx:** https://basescan.org/tx/0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476
+- **Recent tx:** https://basescan.org/tx/0xdc42587932cb065c44843ad8226fb65db4d7f6e0b6b5cd2f9f9709b67a67a476
 
 **Live app:** https://syncedgesolutions.xyz/pivot
 
