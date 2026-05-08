@@ -31,9 +31,9 @@ All contracts are live on Base mainnet and have been operational since Q1 2026. 
 
 ---
 
-## Architecture: Five-Contract System
+## Architecture: Six-Contract System
 
-PivotBot v2.0 uses five contracts working in concert:
+PivotBot v2.0 uses six contracts working in concert:
 
 1. **PivotBotFactory** — Deploys a unique PivotBot instance per user (deterministic via CREATE2)
 2. **PivotBotFactoryManager** — Protocol-wide configuration, fee routing, and access control
@@ -314,7 +314,7 @@ The owner can drain at any time regardless of whether any positions are open or 
 
 ## Token Universe (Moonwell Base Markets Only)
 
-PivotBot is strictly scoped to the 12 tokens listed on Moonwell's Base deployment:
+PivotBot is strictly scoped to the 11 tokens listed on Moonwell's Base deployment:
 
 | Token   | Type       | Role in Strategies             |
 | ------- | ---------- | ------------------------------ |
@@ -323,7 +323,6 @@ PivotBot is strictly scoped to the 12 tokens listed on Moonwell's Base deploymen
 | RETH    | LST (ETH)  | Supply/Borrow (Neutral)        |
 | WeETH   | LST (ETH)  | Supply (Neutral)               |
 | CBBTC   | BTC        | Supply/Borrow (Neutral/Long)   |
-| LBTC    | BTC        | Supply/Borrow (Neutral)        |
 | USDC    | Stablecoin | Supply (Short) / Borrow (Long) |
 | DAI     | Stablecoin | Supply (Short) / Borrow (Long) |
 | WETH    | ETH        | Supply/Borrow                  |
@@ -397,12 +396,12 @@ Applies drawdown proxy by sentiment:
 
 Returns top 3 ranked strategies with full APY breakdown.
 
-### Full Strategy Matrix (25 Pairs)
+### Full Strategy Matrix (23 Pairs)
 
-**Delta Neutral (8 pairs):**  
-cbETH/wstETH · cbETH/rETH · cbETH/WeETH · wstETH/rETH · wstETH/WeETH · rETH/WeETH · cbBTC/LBTC · CBBTC/LBTC
+**Delta Neutral (6 pairs):**  
+cbETH/wstETH · cbETH/rETH · cbETH/WeETH · wstETH/rETH · wstETH/WeETH · rETH/WeETH
 
-**Delta Long (8 pairs):**  
+**Delta Long (10 pairs):**  
 cbETH/USDC · wstETH/USDC · rETH/USDC · WeETH/USDC · cbETH/DAI · wstETH/DAI · CBBTC/USDC · CBBTC/DAI · VIRTUAL/USDC · All Delta Neutral Pairs
 
 **Delta Short (7 pairs):**  
@@ -512,7 +511,7 @@ The `staleThreshold` is configurable by protocol owner via `setStaleThreshold(ui
 
 ### Revenue Routing — No Custodial Risk
 
-**Critical distinction:** PivotProPass never custodies ETH. Payments are validated, state is updated, then ETH is immediately forwarded using the CEI pattern (Checks-Effects-Interactions):
+**Critical distinction:** PivotProPass never custodies ETH. Payments are validated to be exact (no overpayment, no refunds), state is updated, then ETH is immediately forwarded using the CEI pattern (Checks-Effects-Interactions):
 
 ```solidity
 function mintFor(address user, Tier tier) external payable noZeroAddress(user) {
@@ -521,7 +520,7 @@ function mintFor(address user, Tier tier) external payable noZeroAddress(user) {
     if (tokenOf[user] != 0) revert OnePassPerWallet();
 
     uint256 requiredEth = getRequiredEth(tier);
-    if (msg.value != requiredEth) revert InsufficientEth(requiredEth, msg.value);
+    if (msg.value != requiredEth) revert InsufficientEth(requiredEth, msg.value);  // Exact ETH required
 
     // Effects: Update state first
     uint256 tokenId = ++_nextTokenId;
@@ -541,10 +540,11 @@ function mintFor(address user, Tier tier) external payable noZeroAddress(user) {
 
 **Key properties:**
 - Only AgentVaultFactory can call `mintFor()` (authorization check)
-- User must send exactly `requiredEth` (no overpayment, no refunds)
-- Minting fails atomically if any step fails
+- User must send exactly `requiredEth` (strict equality check; no overpayment tolerance, no refunds)
+- Renewal calls `renew(tier)` also require exact ETH: `if (msg.value != requiredEth) revert InsufficientEth()`
+- Minting/renewal fails atomically if any step fails
 - Zero ETH custodied in PivotProPass at any time
-- Revenue routing automatically follows `protocolFeeRecipient` changes on PivotBotFactoryManager (read live on every mint)
+- Revenue routing automatically follows `protocolFeeRecipient` changes on PivotBotFactoryManager (read live on every mint/renewal)
 - No separate withdrawal function or governance delay needed
 
 ### Subscription Tiers & Pricing
@@ -610,11 +610,10 @@ User Wallet ──{ETH: Y}──> PivotProPass.renew(tier)
                    │           │           │
               1. Validate  2. Stack Time  3. Forward ETH
                    │           │           │
-           tokenOf[user] != 0   │     address treasury =
-           Y >= required   expiryOf =   FACTORY_MANAGER
-                           max(old, now) .protocolFeeRecipient()
-                           + duration    Forward Y → treasury
-                                         Refund excess to user
+           tokenOf[user] != 0   │     Y must equal
+           Y >= required   expiryOf =   requiredEth
+                           max(old, now) Forward Y → treasury
+                           + duration
 ```
 
 ### Pass Status & Execution Gate
@@ -687,17 +686,17 @@ Free analyses cannot be used to execute positions; they are purely informational
 
 ### Implementation Scope
 
-| Component                    | Location                                          | Status     |
-| ---------------------------- | ------------------------------------------------- | ---------- |
-| PivotProPass contract        | `src/PivotProPass.sol`                            | ✅ Complete |
-| IPivotProPass interface      | `src/interfaces/IPivotProPass.sol`                | ✅ Complete |
-| Chainlink interface (copied) | `src/interfaces/AggregatorV3Interface.sol`        | ✅ Complete |
-| AgentVaultFactory updates    | `src/AgentVaultFactory.sol`                       | ✅ Complete |
-| AgentVault updates           | `src/AgentVault.sol`                              | ✅ Complete |
-| Deployment script            | `script/DeployPivotProPass.s.sol`                 | ✅ Complete |
-| Mock for testing             | `test/mocks/MockPivotProPass.sol`                 | ✅ Complete |
-| Unit tests                   | `test/PivotProPass.t.sol`                         | ✅ Complete |
-| Integration tests            | `test/AgentVaultFactoryPivotProIntegration.t.sol` | ✅ Complete |
+| Component                    | Location                                    | Status     |
+| ---------------------------- | ------------------------------------------- | ---------- |
+| PivotProPass contract        | Deployed (separate repo)                    | ✅ Complete |
+| IPivotProPass interface      | ABI available (src/lib/contracts/)          | ✅ Complete |
+| Chainlink integration        | Live on-chain via contract                  | ✅ Complete |
+| AgentVault contract          | Deployed (separate repo)                    | ✅ Complete |
+| AgentVaultFactory contract   | Deployed (separate repo)                    | ✅ Complete |
+| Frontend: useAgentVault hook | `src/hooks/use-agent-vault.ts`              | ✅ Complete |
+| Frontend: AgentSetupCard     | `src/components/pivot/AgentSetupCard.tsx`   | ✅ Complete |
+| Frontend: PassRenewalModal   | `src/components/pivot/PassRenewalModal.tsx` | ✅ Complete |
+| Solidity tests & deployment  | Separate repository                         | ✅ Complete |
 
 ---
 
@@ -776,7 +775,8 @@ Fees flow to the protocol treasury via Manager. No token required to use the pro
 ## Testing & Security
 
 **Test suite (Foundry):**
-- Unit tests: individual function behaviour for all PivotBot and AgentVault entry points
+Comprehensive test documentation including unit tests, integration tests, fuzz tests, and security audits is maintained in a separate Solidity contract repository. This includes:
+- Unit tests for all PivotBot and AgentVault entry points
 - Integration tests: full fork tests against Base mainnet state (Moonwell + Aerodrome + Balancer live contract state)
 - Fuzz tests: randomised input coverage on leverage parameters, token amounts, swap paths, cap values, and cooldown intervals
 - AgentVault-specific tests: selector rejection, cap enforcement, cooldown enforcement, drain atomicity, executor rotation
@@ -792,6 +792,7 @@ Fees flow to the protocol treasury via Manager. No token required to use the pro
 - AgentVault `drain()` has no timelock and requires no agent involvement
 - PivotProPass pass check runs **first** in AgentVault.execute() before any other constraint (fail-fast)
 - AgentVault authorization: executor role cannot call `drain()`, `setSpendingCapPerTx()`, `setCooldown()`, or any config functions — only owner (DEFAULT_ADMIN_ROLE)
+- Pass renewal enforces exact ETH amount (no tolerance for overpayment)
 
 **Security audit:** Commissioned Q2 2026. Results will be published publicly. AgentVault and PivotProPass are in scope.
 

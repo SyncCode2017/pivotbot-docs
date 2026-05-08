@@ -89,61 +89,76 @@ The guardian does not receive broad control over the bot. It operates through a 
 
 ---
 
-## Why The Architecture Matters
+## Why The Architecture Matters (Six-Contract System)
 
 PivotBot is designed so users keep custody while the automation layer stays tightly bounded.
 
 ### PivotBot.sol
 
-This is the execution engine. It handles leverage and deleverage lifecycle logic, Balancer flashloan callbacks, Moonwell supply and borrow operations, and Aerodrome swaps.
+The core execution engine. Handles leverage and deleverage lifecycle logic, Balancer V2 flashloan callbacks, Moonwell supply and borrow operations, and Aerodrome V2 swaps. Role-based access control with `DEFAULT_ADMIN_ROLE`, `MANAGER_ROLE` (granted to AgentVault), and `PAUSER_ROLE`. Immutable after deployment (no upgradeability).
 
 ### PivotBotFactory.sol
 
-This deploys a dedicated PivotBot instance for each user with CREATE2. Positions are isolated per user rather than pooled together, which prevents fund commingling.
+Deploys a unique, per-user PivotBot instance using CREATE2 deterministic addressing. Each user's collateral and borrow positions are held in their own bot contract — no commingling of funds. This is the non-custodial guarantee.
 
 ### PivotBotFactoryManager.sol
 
-This contract manages protocol configuration, access roles, fee routing, and the approved token and market set.
+Manages protocol-wide configuration, role-based access control, fee collection (0.05% on flashloans + 0.05% on swaps), and the Moonwell token/market whitelist.
 
 ### AgentVault.sol
 
-This is the authority boundary between the CDP agent hot wallet and the user bot. The agent executes through AgentVault, not directly against PivotBot.
+The authority boundary between the CDP agent hot wallet and the user's PivotBot. The agent does not hold direct access to PivotBot; it only executes through AgentVault.
 
-AgentVault enforces four key constraints:
+AgentVault enforces four hard Solidity-level constraints:
 
-- **Pass validity first:** execution fails immediately if the wallet no longer has an active PivotProPass
-- **Selector whitelist:** only approved execution selectors can be forwarded
-- **Per-transaction spending cap:** owner-defined token spending limits bound each execution
-- **Cooldown and pause controls:** owners can slow or halt execution at any time
+1. **Pass validity check (first):** execution fails immediately if the wallet no longer has an active PivotProPass
+2. **Function selector whitelist:** only 9 approved execution selectors can be forwarded (supplyAsset, borrowAsset, repayBorrow, repayBorrowBehalf, redeemAssetFromMw, repayOrSupplyAssetWithFlashloan, swapOnAerodromeV2, claimRewards, accrueInterest)
+3. **Per-transaction spending cap:** owner-defined per-token spending limits bound each execution
+4. **Cooldown enforcement:** configurable minimum gap (in seconds) between consecutive executions; owners can also pause execution instantly
+
+Owners have full control: they can adjust caps, cooldowns, pause/unpause, and withdraw working capital atomically via `drain()`.
+
+### AgentVaultFactory.sol
+
+Coordinates atomic co-deployment of AgentVault instances and PivotProPass NFT minting in a single transaction.
 
 ### PivotProPass.sol
 
-This is the time-gated subscription NFT used for agent execution access.
-
-### AgentVaultFactory onboarding flow
-
-Vault deployment and pass minting are coordinated atomically so users can set up the guarded automation layer in one flow.
+Soulbound (non-transferable) ERC-721 NFT that time-gates agent execution access. Pricing is USD-denominated and converted to ETH on-chain via Chainlink oracle (ETH/USD on Base). Revenue flows immediately to the protocol treasury with zero custodial risk.
 
 ---
 
 ## Strategy Universe
 
-PivotBot currently works across **12 Moonwell Base markets**:
+PivotBot is strictly scoped to **12 Moonwell Base markets**:
 
-- **LSTs:** cbETH, wstETH, rETH, WeETH
-- **BTC assets:** cbBTC, LBTC
-- **Stablecoins:** USDC, DAI
-- **Base-native or protocol assets:** WETH, WELL, AERO, VIRTUAL
+| Token   | Type       | Role in Strategies             |
+| ------- | ---------- | ------------------------------ |
+| CBETH   | LST (ETH)  | Supply (Neutral/Long)          |
+| WSTETH  | LST (ETH)  | Supply/Borrow (Neutral)        |
+| RETH    | LST (ETH)  | Supply/Borrow (Neutral)        |
+| WeETH   | LST (ETH)  | Supply (Neutral)               |
+| CBBTC   | BTC        | Supply/Borrow (Neutral/Long)   |
+| LBTC    | BTC        | Supply/Borrow (Neutral)        |
+| USDC    | Stablecoin | Supply (Short) / Borrow (Long) |
+| DAI     | Stablecoin | Supply (Short) / Borrow (Long) |
+| WETH    | ETH        | Supply/Borrow                  |
+| WELL    | Protocol   | Borrow (Short)                 |
+| AERO    | Protocol   | Supply/Borrow                  |
+| VIRTUAL | Protocol   | Supply/Borrow                  |
 
-The strategy engine evaluates **23 core pairs** across three styles:
+The strategy engine evaluates **23 trading pairs** across three sentiment styles:
 
-| Strategy Type     | Count | What It Means                                                                        | Typical User               |
-| ----------------- | ----- | ------------------------------------------------------------------------------------ | -------------------------- |
-| **Delta Neutral** | 8     | Supply and borrow correlated assets to target spread with lower directional exposure | Conservative yield seekers |
-| **Delta Long**    | 8     | Supply ETH or BTC-linked assets and borrow stablecoins                               | Bullish users              |
-| **Delta Short**   | 7     | Supply stablecoins and borrow appreciating assets                                    | Bearish or hedging users   |
+| Strategy Type     | Count | What It Means                                                                     | Typical User               |
+| ----------------- | ----- | --------------------------------------------------------------------------------- | -------------------------- |
+| **Delta Neutral** | 8     | Supply and borrow correlated assets (LST ↔ LST, BTC ↔ BTC) to capture APY spreads | Conservative yield seekers |
+| **Delta Long**    | 8     | Supply ETH or BTC-linked assets, borrow stablecoins; profit if prices rise        | Bullish traders            |
+| **Delta Short**   | 7     | Supply stablecoins, borrow appreciating assets; profit if prices fall             | Bearish or hedging users   |
 
-Examples include LST-vs-LST spreads such as cbETH/wstETH, BTC cross-pairs such as cbBTC/LBTC, long setups using ETH or BTC collateral against USDC or DAI debt, and short setups using stablecoins against ETH, BTC, or WELL exposure.
+**Examples:**
+- **Neutral:** cbETH/wstETH, wstETH/rETH, cbBTC/LBTC (LST or BTC spread positions earning APY differentials)
+- **Long:** cbETH/USDC, wstETH/DAI, cbBTC/USDC (leveraged long ETH/BTC with stablecoin liability)
+- **Short:** USDC/cbETH, DAI/cbBTC, USDC/WELL (leveraged short exposure with stablecoin collateral)
 
 ---
 
