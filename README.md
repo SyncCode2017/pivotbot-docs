@@ -1,10 +1,10 @@
-# PivotBot: AI-Powered Leveraged Yield for Base
+# PivotBot: Non-Custodial Leveraged Yield Agent for Base DeFi
 
-**Non-custodial leveraged yield automation with an autonomous health-factor guardian**
+**AI-powered leveraged yield automation with an autonomous health-factor guardian**
 
-Set a yield target, choose your market view, and let PivotBot handle leverage, strategy selection, and risk monitoring without giving up custody of your assets.
+Set a yield target, choose your market view, and let PivotBot handle leverage, strategy selection, and risk monitoring — all without giving up custody of your assets. The CDP Guardian continuously monitors your position and autonomously intervenes before liquidation, using only your pre-approved working capital.
 
-**Version 2.1 - April 2026**  
+**Version 2.1 — August 2026**  
 **Author:** Abolaji M. Adedeji · Syncedge Solutions  
 **Live App:** [syncedgesolutions.xyz/pivot](https://syncedgesolutions.xyz/pivot)  
 **Technical Overview:** [docs/technical-overview.md](./docs/technical-overview.md)  
@@ -81,11 +81,33 @@ Users choose:
 
 The strategy engine then filters the available pair universe, fetches live Moonwell rates through Multicall3, checks Aerodrome liquidity, and ranks the best candidates.
 
-### 4. It monitors health factor with an AI guardian
+### 4. It monitors health factor with an AI guardian that acts autonomously
 
-PivotBot integrates a CDP AgentKit-powered guardian that monitors health factor and can act before liquidation. The default threshold is **1.25**, and the threshold is user-configurable.
+PivotBot integrates a **CDP AgentKit-powered guardian** that continuously monitors `% Credit Remaining` (Moonwell's formula: `collateralValueInEth × collateralFactor / borrowBalanceInEth × 100`) and can autonomously intervene before liquidation. The default threshold is **85% Credit Remaining** (equivalent to Health Factor ~1.18 when CF=0.825), and the threshold is user-configurable.
 
-The guardian does not receive broad control over the bot. It operates through a per-user AgentVault that enforces strict onchain constraints before any action reaches PivotBot.
+When % Credit Remaining drops below the user's defined threshold, the guardian performs an **iterative, 20% partial repayment** of the highest-value borrowed asset using only the working capital already sitting in the user's AgentVault:
+
+1. **Read** Moonwell position data (collateral, borrow balances, prices)
+2. **Check** cooldown status by reading `getNextExecutionTime()` from AgentVault
+3. **Verify** user's PivotProPass is still active
+4. **Determine** the highest-value borrowed asset and compute 20% of it
+5. **Convert** AgentVault funds: USDC → WETH (via Aerodrome) first, then WETH → borrow token
+6. **Dispatch** a `repayBorrow()` call through `AgentVault.execute()` with the swapped borrow token
+
+**Key invariants the guardian respects at all times:**
+
+| Constraint | Enforcement |
+|---|---|
+| **No collateral redemption** | `redeemAssetFromMw` is never called |
+| **No flashloans** | `repayOrSupplyAssetWithFlashloan` is never called |
+| **Vault funds only** | All repayments use working capital already in the user's AgentVault |
+| **Cooldown respected** | Each action is dispatched through `AgentVault.execute()`, which enforces cooldown on-chain |
+| **Pass-gated** | Users with expired PivotProPass are skipped |
+| **Funds preferred in WETH** | USDC is converted to WETH before any borrow repayment |
+
+Because the AgentVault cooldown permits only one `execute()` call per interval, a full recovery (swap + repay) requires at least **two cron cycles** — the guardian is patient and makes incremental progress each cycle, capped at 10 iterations per cron invocation.
+
+**Non-custodial guarantee:** The CDP AgentKit hot wallet can only call `AgentVault.execute()` with whitelisted selectors. It can never withdraw tokens from AgentVault, redeem collateral, or access position proceeds. Position collateral held in Moonwell via PivotBot is never accessible to the agent hot wallet.
 
 ---
 
@@ -112,11 +134,20 @@ The authority boundary between the CDP agent hot wallet and the user's PivotBot.
 AgentVault enforces four hard Solidity-level constraints:
 
 1. **Pass validity check (first):** execution fails immediately if the wallet no longer has an active PivotProPass
-2. **Function selector whitelist:** only 9 approved execution selectors can be forwarded (supplyAsset, borrowAsset, repayBorrow, repayBorrowBehalf, redeemAssetFromMw, repayOrSupplyAssetWithFlashloan, swapOnAerodromeV2, claimRewards, accrueInterest)
+2. **Function selector whitelist:** only these 9 approved execution selectors can be forwarded:
+   - `supplyAsset` — supply collateral to Moonwell
+   - `borrowAsset` — borrow from Moonwell
+   - `repayBorrow` — repay borrowed assets
+   - `repayBorrowBehalf` — repay on behalf of PivotBot
+   - `redeemAssetFromMw` — redeem collateral (not used by guardian)
+   - `repayOrSupplyAssetWithFlashloan` — flashloan-assisted operations
+   - `swapOnAerodromeV2` — token swaps via Aerodrome
+   - `claimRewards` — claim Moonwell WELL rewards
+   - `accrueInterest` — trigger interest accrual on Moonwell
 3. **Per-transaction spending cap:** owner-defined per-token spending limits bound each execution
 4. **Cooldown enforcement:** configurable minimum gap (in seconds) between consecutive executions; owners can also pause execution instantly
 
-Owners have full control: they can adjust caps, cooldowns, pause/unpause, and withdraw working capital atomically via `drain()`.
+Owners have full control: they can adjust caps, cooldowns, pause/unpause, and withdraw working capital atomically via `drain()`. Config functions (drain, setSpendingCap, setCooldown, pause, unpause) are restricted to the **owner only** — the executor role cannot call them.
 
 ### AgentVaultFactory.sol
 
@@ -164,14 +195,14 @@ The strategy engine evaluates **23 trading pairs** across three sentiment styles
 
 ## PivotProPass: Access Without Custody Risk
 
-PivotProPass is a **soulbound ERC-721 pass** that gates agent execution.
+PivotProPass is a **soulbound ERC-721 pass** that gates agent execution on-chain.
 
 What that means for users:
 
-- **One pass per wallet**
-- **Non-transferable by design** to avoid secondary-market gaming
-- **Renewals stack remaining time** so early renewal does not waste unused days
-- **Execution access is checked onchain** inside AgentVault before any other execution rule
+- **One pass per wallet** — enforced by `tokenOf[address]` mapping at mint time
+- **Non-transferable by design** to avoid secondary-market gaming; soulbound property preserves this invariant through the pass lifecycle
+- **Renewals stack remaining time** — early renewal does not waste unused days: `expiry = max(oldExpiry, block.timestamp) + duration`
+- **Execution access is checked onchain** inside AgentVault before any other execution rule — this runs **first** (fail-fast: expired passes block execution immediately with `PassRequired()` error)
 
 ### Subscription durations
 
@@ -182,11 +213,49 @@ What that means for users:
 | Six Months    | 180 days |
 | Twelve Months | 365 days |
 
-Pricing is USD-denominated and converted to ETH onchain using the Chainlink ETH/USD feed on Base. The pass contract validates stale price data before minting or renewal.
+Pricing is USD-denominated and converted to ETH onchain using the Chainlink ETH/USD oracle on Base. The pass contract validates stale price data before minting or renewal, and enforces exact ETH amounts (no tolerance for overpayment). Revenue flows immediately to the protocol treasury with zero custodial risk.
 
 ### Free usage before subscribing
 
-Users can access **3 free strategy analyses per calendar month**. Analysis is free, but **agent execution requires an active PivotProPass**.
+Users can access **3 free strategy analyses per calendar month** (frontend-only feature, tracked via localStorage). The distinction is important:
+
+- **Analysis** (intent → reasoning → recommendation): Always free, up to 3/month
+- **Atomic execution** (open/close position on PivotBot): Requires active PivotProPass
+
+Free analyses cannot be used to execute positions — they are purely informational.
+
+---
+
+## Agent Setup UI (v2.1)
+
+The frontend Agent tab provides a complete interface for AgentVault management and guardian configuration:
+
+### Agent Setup Card
+
+The card surfaces all AgentVault state and controls in one place:
+
+- **AgentVault address** — the deployed contract address for this vault
+- **Vault owner** — the principal wallet used for PivotProPass validity checks
+- **WETH/USDC spending caps per tx** — current max spend per transaction for each token
+- **Cooldown setting** — minimum gap (in seconds) between consecutive agent executions
+- **Last/Next execution timestamps** — including a live countdown to next available execution
+- **Pause status** — whether execution is currently paused
+- **PivotProPass expiry & active status** — real-time boolean check
+- **Drain All button** — sweeps WETH, USDC, and ETH dust to owner wallet atomically
+- **Update spending cap/cooldown forms** — adjust constraints independently per token
+
+### Additional Components
+
+| Component | Location | Purpose |
+|---|---|---|
+| `useAgentVault` hook | `src/hooks/use-agent-vault.ts` | Batched Multicall3 reads for all vault state + write functions |
+| `usePivotBot` hook | `src/hooks/use-pivot-bot.ts` | Bot position and strategy state |
+| `HealthGauge` | `src/components/pivot/HealthGauge.tsx` | Visual % Credit Remaining gauge |
+| `AgentMonitoringConfig` | `src/components/pivot/AgentMonitoringConfig.tsx` | Configure guardian thresholds |
+| `LowVaultFundsWarning` | `src/components/pivot/PivotDashboard.tsx` | Warns when AgentVault working capital is low |
+| `PassRenewalModal` | `src/components/pivot/PassRenewalModal.tsx` | Tier-based pass renewal flow |
+
+The `useAgentVault` hook batches all reads (vault owner, spending caps, cooldown, execution times, pause status, balances, pass status) into a single Multicall3 call for gas-efficient UI rendering.
 
 ---
 
@@ -203,15 +272,15 @@ Fees route through the protocol treasury via Manager. There is no separate utili
 
 ---
 
-## Live Deployment On Base
+## On-Chain Verification
+
+All contracts are live on Base mainnet and verifiable on Basescan:
 
 | Contract     | Address                                      | Role                                    |
 | ------------ | -------------------------------------------- | --------------------------------------- |
 | **PivotBot** | `0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3` | Core leverage and deleverage engine     |
-| **Factory**  | `0xc4E537890e86fDD44aF936218f80d7326820d97d` | Per-user bot deployment                 |
+| **Factory**  | `0xc4E537890e86fDD44aF936218f80d7326820d97d` | Deterministic per-user bot deployment   |
 | **Manager**  | `0x144F04807a6af905E3112Fe3Da9302D308c6DF26` | Fee routing, config, and access control |
-
-**Verification and activity:**
 
 - [PivotBot on Basescan](https://basescan.org/address/0x2d6781c28d77f8a446d9fa8d2ad421be9aa465e3)
 - [Factory on Basescan](https://basescan.org/address/0xc4E537890e86fDD44aF936218f80d7326820d97d)
@@ -222,19 +291,19 @@ Fees route through the protocol treasury via Manager. There is no separate utili
 
 ## Technology Stack
 
-| Layer              | Technology                       |
-| ------------------ | -------------------------------- |
-| Smart contracts    | Solidity 0.8.33, Foundry         |
-| Chain              | Base                             |
-| Flashloans         | Balancer V2                      |
-| Lending            | Moonwell Base                    |
-| DEX routing        | Aerodrome V2                     |
-| Agent framework    | CDP AgentKit                     |
-| Agent wallets      | CDP Server Wallets               |
-| Authority boundary | AgentVault                       |
-| Frontend           | React, Wagmi, Viem, Tailwind CSS |
-| Onchain reads      | Multicall3                       |
-| NFT standard       | ERC-721 via OpenZeppelin 5.x     |
+| Layer              | Technology                                  |
+| ------------------ | ------------------------------------------- |
+| Smart contracts    | Solidity 0.8.33, Foundry                    |
+| Chain              | Base (Ethereum L2 via OP Stack)             |
+| Flashloans         | Balancer V2 (`IVault.flashLoan`)            |
+| Lending            | Moonwell Base (Compound V2 fork)            |
+| DEX routing        | Aerodrome V2 (Velodrome fork, Base)         |
+| Agent framework    | CDP AgentKit (Coinbase Developer Platform)  |
+| Agent wallets      | CDP Server Wallets (non-custodial)           |
+| Authority boundary | AgentVault.sol (per-user authority cap)     |
+| Frontend           | React, Wagmi, Viem, Tailwind CSS            |
+| Onchain reads      | Multicall3 (batched reads)                  |
+| NFT standard       | ERC-721 via OpenZeppelin 5.x                |
 
 ---
 
@@ -243,13 +312,18 @@ Fees route through the protocol treasury via Manager. There is no separate utili
 ### Built-in protections
 
 - Reentrancy guards on mutating entry points
-- Balancer callback validation for flashloan execution
-- Approved token and market whitelist
-- Atomic slippage enforcement
-- No delegatecall-based execution path
+- Balancer callback validation — only `IVault(balancerVault)` can trigger `receiveFlashLoan`
+- Approved token and market whitelist (Manager-controlled)
+- Atomic slippage enforcement — position reverts rather than executing at unfavourable rates
+- No `delegatecall`-based execution path
 - Checks-Effects-Interactions pattern throughout
 - Agent execution restricted by AgentVault rather than direct manager access
-- `drain()` support for owner recovery of WETH, USDC, and ETH dust from AgentVault
+- CDP AgentKit guardian scoped to only owner-whitelisted selectors via AgentVault (executor role only)
+- AgentVault `drain()` has no timelock and requires no agent involvement
+- PivotProPass pass check runs **first** in `AgentVault.execute()` before any other constraint (fail-fast)
+- AgentVault authorization: executor role cannot call `drain()`, `setSpendingCapPerTx()`, `setCooldown()`, `pause()`, `unpause()`, or any config functions — only owner (`DEFAULT_ADMIN_ROLE`)
+- Pass renewal enforces exact ETH amount (no tolerance for overpayment)
+- Token input validation against approved registry
 
 ### Testing status
 
@@ -266,28 +340,28 @@ Security audit is commissioned for **Q2 2026**. AgentVault and PivotProPass are 
 ## Roadmap
 
 ### Q1 2026
-
 - Core contracts deployed on Base
 - Live yield demonstration at +44.97% net APY on cbETH/wstETH
 - Public app live at syncedgesolutions.xyz/pivot
 
 ### Q2 2026
-
 - Expand guardian and intent UI experience
 - Launch and refine PivotProPass workflows
 - Complete and publish security audit work
 
 ### Q3 2026
-
 - Scale B2B white-label deployments
-- Extend to Unichain and OP Mainnet
+- Extend to Unichain and OP Mainnet (Optimism Superchain family)
 - Bring full autonomous deleveraging into wider production use
 
-### Q4 2026 and beyond
-
-- Arbitrum deployment
+### Q4 2026
+- Arbitrum One deployment
 - Institutional API access
 - Governance and multi-chain expansion
+
+### 2027 and beyond
+- Additional EVM chains with Moonwell/Compound V2 deployments
+- Cross-chain deployments use the same Factory/Manager/PivotBot/AgentVault architecture — only the external protocol addresses (Moonwell, Aerodrome, Balancer) are chain-specific. The core logic is chain-agnostic.
 
 ---
 
@@ -306,7 +380,7 @@ Security audit is commissioned for **Q2 2026**. AgentVault and PivotProPass are 
 
 ## Important Disclaimer
 
-PivotBot is a **non-custodial protocol**, but leveraged DeFi is still risky. Smart contract risk, liquidation risk, market volatility, oracle issues, and slippage can all affect outcomes.
+PivotBot is a **non-custodial protocol** — users retain custody of funds at all times via the per-user bot and AgentVault architecture. However, leveraged DeFi is still risky. Smart contract risk, liquidation risk, market volatility, oracle issues, and slippage can all affect outcomes.
 
 This README is for informational purposes only and should not be treated as financial advice.
 

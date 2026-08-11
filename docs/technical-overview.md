@@ -2,7 +2,7 @@
 
 ### Non-Custodial Leveraged Yield Agent for Base DeFi — with Autonomous Health Factor Guardian
 
-**Version 2.0 — April 2026**  
+**Version 2.1 — August 2026**  
 **Author:** Abolaji M. Adedeji · Syncedge Solutions  
 **Live App:** syncedgesolutions.xyz/pivot  
 **Contact:** abolaji@syncedgesolutions.xyz
@@ -13,7 +13,7 @@
 
 PivotBot is a non-custodial, onchain yield automation protocol deployed on Base. It enables users to open amplified leveraged lending positions across Moonwell Base markets in a single atomic transaction using Balancer V2 zero-fee flashloans, then earn supply-side yield on the full leveraged collateral — without paying funding rates.
 
-Version 2.0 extends the core protocol with an **intent-driven AI agent layer** powered by Coinbase CDP AgentKit, and introduces **AgentVault** — a per-user, owner-controlled intermediary contract that bounds agent authority to a hard-capped working capital allocation. Users express a yield intent once — choosing a sentiment bias (delta neutral, delta long, or delta short), a target APY, and a risk tolerance — and the agent scans live on-chain data, selects the optimal strategy pair, executes atomically, and then monitors position health continuously, auto-deleveraging before liquidation if the health factor crosses a user-defined threshold. At no point does the agent hold unbounded authority over user funds.
+Version 2.1 extends the core protocol with an **intent-driven AI agent layer** powered by Coinbase CDP AgentKit, and introduces **AgentVault** — a per-user, owner-controlled intermediary contract that bounds agent authority to a hard-capped working capital allocation. Users express a yield intent once — choosing a sentiment bias (delta neutral, delta long, or delta short), a target APY, and a risk tolerance — and the agent scans live on-chain data, selects the optimal strategy pair and executes atomically. Once a position is open, the **CDP Guardian** continuously monitors % Credit Remaining (per Moonwell's formula) and, when it drops below a user-defined threshold, iteratively repays 20% of the highest-value borrowed asset using only the working capital held in the user's AgentVault — never redeeming collateral or using flashloans. At no point does the agent hold unbounded authority over user funds.
 
 ---
 
@@ -106,7 +106,7 @@ User → PivotBot.closePosition(borrowAsset, collateralAsset)
 **Security measures in PivotBot.sol:**
 - Reentrancy guard on all external entry points
 - Balancer callback validation: only Balancer Vault can call `receiveFlashLoan`
-- Token whitelist: only Moonwell Base market tokens accepted (CBETH, WSTETH, RETH, WeETH, CBBTC, LBTC, USDC, DAI, WETH, WELL, AERO)
+- Token whitelist: only Moonwell Base market tokens accepted (CBETH, WSTETH, RETH, WeETH, CBBTC, USDC, DAI, WETH, WELL, AERO, VIRTUAL)
 - Slippage tolerance enforced at swap step; tx reverts if exceeded
 - No upgradeability on the core engine (immutable after deployment)
 
@@ -332,6 +332,60 @@ PivotBot is strictly scoped to the 11 tokens listed on Moonwell's Base deploymen
 
 ---
 
+## % Credit Remaining — Moonwell Health Metric
+
+PivotBot v2.1 adopts Moonwell's native **% Credit Remaining** as the primary health metric displayed throughout the dashboard. This replaces the raw Health Factor number with a percentage that has a clear, intuitive interpretation: 0% means the position is at liquidation risk.
+
+### Formula
+
+Moonwell defines % Credit Remaining as:
+
+```
+% Credit Remaining = (Credit Limit − Total Borrowed) / Credit Limit × 100
+
+Where:
+  Credit Limit = Σ(Supply_i_in_USD × CollateralFactor_i)
+  Total Borrowed = Σ(Borrow_i_in_USD)
+```
+
+The relationship to the traditional Health Factor (HF = Credit Limit / Total Borrowed) is:
+
+```
+% Credit Remaining = (HF − 1) / HF × 100
+```
+
+All supply and borrow values are converted to WETH via Aerodrome V2 quotes (`getAmountOutOnAerodromeV2`) before the ratio is computed, ensuring consistent denomination.
+
+### Dashboard Integration
+
+| Display                   | Description                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Health Gauge ring**     | Visual gauge using % Credit Remaining directly (0–100% fill). When no borrows exist, the gauge shows 100%. The gauge color changes by threshold. |
+| **Center label**          | Shows `XX.X%` with "Credit" subtitle (replaces the old HF number + "Health" label)                                                               |
+| **Stats card**            | Header card in the dashboard shows "% Credit Remaining" with real-time percentage and status text                                                |
+| **Status thresholds**     | `< 15%` → "At Risk" (red), `15–25%` → "Caution" (amber), `≥ 25%` → "Safe" (emerald)                                                              |
+| **Supply/Borrow summary** | Always displayed below the gauge in WETH units                                                                                                   |
+
+These thresholds map to Health Factor equivalents of < 1.176 (danger), < 1.333 (warning), and ≥ 1.333 (safe).
+
+### Agent Monitoring Config
+
+The guardian configuration slider shows the user's threshold as **% Credit Remaining** (computed live from the stored Health Factor via `healthFactorToCreditRemainingPct()`). The slider range labels show both HF and CR equivalents: e.g. "1.10 HF / 9% CR (Risky)" to "2.00 HF / 50% CR (Safe)", with the default at "1.25 HF / 20% CR".
+
+### Agent Tab: Low Vault Funds Warning
+
+When the Agent tab is active and all of the following conditions are true, an amber warning banner is displayed:
+
+- AgentVault is deployed and PivotProPass is active
+- The user has an open borrow position
+- The combined WETH + USDC balance in the vault (USDC converted to WETH via Aerodrome quote) is **less than 20% of the largest single borrow** (in WETH)
+
+The warning reads: *"Your AgentVault holds X.XXXX WETH in combined WETH + USDC — less than 20% of your largest borrow (Y.YYYY WETH). The AI guardian may not have enough funds to protect your position if your credit remaining falls. Deposit WETH or USDC to your vault using the card below."*
+
+This ensures users are proactively notified when their vault is underfunded relative to their risk exposure, before the guardian is ever called upon.
+
+---
+
 ## V2.0: The Intent Engine & AI Agent Layer
 
 ### Intent Panel Architecture
@@ -409,47 +463,101 @@ USDC/wstETH · USDC/cbETH · USDC/rETH · USDC/CBBTC · USDC/WELL · DAI/wstETH 
 
 ---
 
-## V2.0: CDP AgentKit Guardian
+## V2.1: CDP AgentKit Guardian — Repay-Only Iterative Algorithm
 
 ### The Liquidation Problem
 
-When a leveraged lending position's health factor drops below 1.0 on Moonwell, the position is subject to liquidation — a third party repays the debt at a penalty and claims the collateral at a discount. The user loses the liquidation penalty (typically 5–10%) on top of any market losses.
+When a leveraged lending position's % Credit Remaining drops to 0% on Moonwell (Health Factor = 1.0), the position is subject to liquidation — a third party repays the debt at a penalty and claims the collateral at a discount. The user loses the liquidation penalty (typically 5–10%) on top of any market losses.
 
-Approximately 30% of DeFi liquidations occur when the health factor is in the 1.0–1.2 range — a window where an automated 10-minute intervention would prevent the liquidation entirely.
+Approximately 30% of DeFi liquidations occur when the health factor is in the 1.0–1.2 range — a window where an automated intervention would prevent the liquidation entirely.
 
-PivotBot v2.0 addresses this with an always-on CDP AgentKit guardian operating through AgentVault.
+PivotBot v2.1 addresses this with an always-on CDP AgentKit guardian operating through AgentVault using a **repay-only iterative strategy**.
 
 ### Guardian Architecture
 
-The guardian is a CDP AgentKit-powered agent running continuously. Its hot wallet is registered as the executor inside the user's AgentVault instance. It never holds working capital directly.
+The guardian is a CDP AgentKit-powered cron job (`api/agent-guardian.ts`) triggered at regular intervals. Its hot wallet is registered as the executor inside each user's AgentVault instance. It never holds working capital directly — all funds used for debt repayment come from the user's AgentVault.
 
-**Monitoring loop:**
+### Guardian Algorithm: `resolveBorrowBreach`
+
+When triggered, the guardian executes a simple, deterministic algorithm:
+
 ```
-Every N blocks:
-  1. Read healthFactor from Moonwell for user's bot address and/or calculate from open positions
-     (comptroller.getAccountLiquidity(botAddress))
-  2. If healthFactor < userThreshold (default: 1.25):
-     → Trigger deleverage decision pipeline
-  3. Deleverage pipeline:
-     a. Calculate optimal partial vs full close
-     b. Construct repayBorrow(), supplyAsset() or repayOrSupplyAssetWithFlashloan() calldata
-     c. Call AgentVault.execute(calldata) via CDP AgentKit wallet
-        → AgentVault validates selector, checks cooldown, checks pause
-        → AgentVault forwards to PivotBot if all constraints pass
-     d. Monitor tx confirmation
-     e. Re-check healthFactor post-execution
-     f. Notify user (webhook / frontend update)
+For each monitored user (up to 50 per run, paginated):
+  1. Compute current % Credit Remaining:
+     - Read all 12 Moonwell mToken borrow balances for the bot
+     - Convert each borrow to WETH via Aerodrome V2 quotes
+     - Calculate HF = totalSupplyWETH / totalBorrowWETH
+     - Convert: % CR = (HF − 1) / HF × 100
+     - Convert user threshold: thresholdCR% = (min_health_factor − 1) / min_health_factor × 100
+
+  2. If %CR < thresholdCR% → BREACH detected:
+     → Call resolveBorrowBreach(vault, bot, pivotBot, min_health_factor)
 ```
 
-**Non-custodial guarantee maintained:**  
-The CDP AgentKit hot wallet can only call `AgentVault.execute()`. Position proceeds from closed positions always go directly to the owner wallet — not to Agent hot wallet. The agent never touches position collateral.
+**`resolveBorrowBreach` — Iterative 20% Repay (max 10 iterations per run):**
 
-**Health factor formula (Moonwell / Compound V2 model):**
 ```
-healthFactor = Σ(collateral_i × collateralFactor_i) / totalBorrowedWETH
-```
-Where `collateralFactor_i` is the per-asset liquidation threshold set by Moonwell governance (e.g. cbETH: 0.78, USDC: 0.82).
+For each iteration (up to 10):
+  a. Cooldown guard: Read getNextExecutionTime() from AgentVault.
+     If cooldown is active → break; resume next cron cycle.
 
+  b. Re-check % Credit Remaining.
+     If %CR ≥ threshold → "breach resolved" → break.
+
+  c. Read all 12 borrow positions; convert to WETH.
+     Find the borrow with the highest WETH value.
+
+  d. Calculate repayTarget = 20% of that borrow's underlying amount.
+
+  e. Read AgentVault balances (WETH, USDC, and the borrow token).
+
+  f. Action — exactly ONE per iteration (due to cooldown):
+     - Step 6a: Vault holds the borrow token → repayBorrow() directly
+     - Step 6b: Vault has USDC → swapOnAerodromeV2(USDC → WETH)
+       Funds are preferably stored in WETH; USDC is converted proactively.
+     - Step 6c: Vault has WETH → swapOnAerodromeV2(WETH → borrow token)
+       Uses whatever WETH is available — partial amounts are swapped even if
+       insufficient for the full 20% target. Partial improvement beats none.
+
+     If no usable funds → break (user must deposit more to vault).
+```
+
+### Key Invariants
+
+| Constraint                   | Enforcement                                                                                                                                                                                                                             |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **No collateral redemption** | `redeemAssetFromMw` is never called. Only `repayBorrow` and `swapOnAerodromeV2`.                                                                                                                                                        |
+| **No flashloans**            | `repayOrSupplyAssetWithFlashloan` is never called.                                                                                                                                                                                      |
+| **Vault funds only**         | All repayments use working capital already sitting in the user's AgentVault.                                                                                                                                                            |
+| **Cooldown respected**       | Before each iteration, the guardian reads `getNextExecutionTime()`. If active, it breaks and resumes next cron cycle. Each action is dispatched through `AgentVault.execute()`, which enforces cooldown on-chain at the Solidity level. |
+| **Pass-gated**               | The guardian skips users whose PivotProPass has expired (`isPassActive()` check).                                                                                                                                                       |
+| **Funds preferred in WETH**  | USDC is converted to WETH before attempting any borrow repayment (Step 6b fires before Step 6c).                                                                                                                                        |
+| **Partial WETH handled**     | If vault has WETH but less than the full 20% target, the guardian swaps whatever is available.                                                                                                                                          |
+
+### Multi-Cron-Cycle Recovery
+
+Because the AgentVault cooldown permits only one `execute()` call per interval, a full recovery (swap + repay) requires at least **two cron cycles**:
+
+```
+Cycle 1: swapOnAerodromeV2(WETH → borrow token)     → vault now holds borrow token
+Cycle 2: repayBorrow(borrow token)                   → debt reduced, CR improved
+Cycle 3: Re-check CR — if still below threshold, repeat from step (c)
+```
+
+The guardian is patient — it makes incremental progress each cron cycle, with the maximum total iterations capped at 10 per cron invocation.
+
+### Non-Custodial Guarantee
+
+The CDP AgentKit hot wallet can only call `AgentVault.execute()` with whitelisted selectors. It can never withdraw tokens from AgentVault, redeem collateral, or access position proceeds. Position collateral held in Moonwell via PivotBot is never accessible to AgentVault or the agent hot wallet.
+
+### % Credit Remaining Formula
+
+```
+% Credit Remaining = (HF − 1) / HF × 100
+  where HF = Σ(supply_i_converted_to_WETH) / Σ(borrow_i_converted_to_WETH)
+```
+
+All supply and borrow values are converted to WETH via Aerodrome V2 quotes for consistent denomination. The guardian computes this on every iteration from fresh on-chain data.
 ---
 
 ## V2.0: PivotProPass — ERC-721 Subscription NFT
@@ -686,23 +794,29 @@ Free analyses cannot be used to execute positions; they are purely informational
 
 ### Implementation Scope
 
-| Component                    | Location                                    | Status     |
-| ---------------------------- | ------------------------------------------- | ---------- |
-| PivotProPass contract        | Deployed (separate repo)                    | ✅ Complete |
-| IPivotProPass interface      | ABI available (src/lib/contracts/)          | ✅ Complete |
-| Chainlink integration        | Live on-chain via contract                  | ✅ Complete |
-| AgentVault contract          | Deployed (separate repo)                    | ✅ Complete |
-| AgentVaultFactory contract   | Deployed (separate repo)                    | ✅ Complete |
-| Frontend: useAgentVault hook | `src/hooks/use-agent-vault.ts`              | ✅ Complete |
-| Frontend: AgentSetupCard     | `src/components/pivot/AgentSetupCard.tsx`   | ✅ Complete |
-| Frontend: PassRenewalModal   | `src/components/pivot/PassRenewalModal.tsx` | ✅ Complete |
-| Solidity tests & deployment  | Separate repository                         | ✅ Complete |
+| Component                       | Location                                              | Status     |
+| ------------------------------- | ----------------------------------------------------- | ---------- |
+| PivotProPass contract           | Deployed (separate repo)                              | ✅ Complete |
+| IPivotProPass interface         | ABI available (src/lib/contracts/)                    | ✅ Complete |
+| Chainlink integration           | Live on-chain via contract                            | ✅ Complete |
+| AgentVault contract             | Deployed (separate repo)                              | ✅ Complete |
+| AgentVaultFactory contract      | Deployed (separate repo)                              | ✅ Complete |
+| Frontend: useAgentVault hook    | `src/hooks/use-agent-vault.ts`                        | ✅ Complete |
+| Frontend: usePivotBot hook      | `src/hooks/use-pivot-bot.ts`                          | ✅ Complete |
+| Frontend: AgentSetupCard        | `src/components/pivot/AgentSetupCard.tsx`             | ✅ Complete |
+| Frontend: AgentMonitoringConfig | `src/components/pivot/AgentMonitoringConfig.tsx`      | ✅ Complete |
+| Frontend: HealthGauge (% CR)    | `src/components/pivot/HealthGauge.tsx`                | ✅ Complete |
+| Frontend: LowVaultFundsWarning  | `src/components/pivot/PivotDashboard.tsx` (Agent tab) | ✅ Complete |
+| Frontend: PassRenewalModal      | `src/components/pivot/PassRenewalModal.tsx`           | ✅ Complete |
+| Backend: Agent Guardian         | `api/agent-guardian.ts`                               | ✅ Complete |
+| Backend: Guardian cron          | Vercel Cron Job (triggered periodically)              | ✅ Complete |
+| Solidity tests & deployment     | Separate repository                                   | ✅ Complete |
 
 ---
 
-## Frontend: Agent Setup UI (New in v2.0)
+## Frontend: Agent Setup UI & Guard Configuration (v2.1)
 
-The `IntentPanel`'s Agent Mode section gains an **Agent Setup card** backed by the `useAgentVault` hook.
+The `IntentPanel`'s Agent tab gains an expanded set of components for AgentVault management and guardian configuration.
 
 ### Agent Setup Card
 
